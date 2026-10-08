@@ -9,6 +9,8 @@ if TYPE_CHECKING:
 
 
 CATALOGUE = [
+    ("admin", "Access admin panel", "Administration"),
+    ("high_volume", "Boost sound volume to 1000%", "Sounds"),
     ("play_sounds", "Play sounds", "Soundboard"),
     ("stop_sounds", "Stop sounds and stop-all", "Soundboard"),
     ("connect_voice", "Connect or move the bot", "Voice"),
@@ -29,11 +31,16 @@ CATALOGUE = [
     ("manage_triggers", "Manage personal sound triggers", "Conversation"),
     ("view_audit", "View audit log", "Activity"),
 ]
-DEFAULTS = {key: key not in {"mute_deafen", "master_volume"} for key, _label, _group in CATALOGUE}
+DEFAULTS = {
+    key: key not in {"admin", "high_volume", "mute_deafen", "master_volume"} for key, _label, _group in CATALOGUE
+}
 
 
 def effective_permissions(overrides: dict, *, admin: bool = False) -> dict[str, bool]:
-    return {key: True if admin else overrides.get(key, default) for key, default in DEFAULTS.items()}
+    return {
+        key: True if admin and key == "admin" else overrides.get(key, True if admin else default)
+        for key, default in DEFAULTS.items()
+    }
 
 
 def check_permission(user: dict, permission: str) -> None:

@@ -16,7 +16,8 @@ export function Soundboard({ clips, user, connected, playing, pending, preview, 
     const pinned = clips.filter(clip => clip.pinned)
     const frequent = clips.filter(clip => (clip.user_play_count || 0) > 0).sort((a,b) => (b.user_play_count || 0) - (a.user_play_count || 0) || a.name.localeCompare(b.name)).slice(0,20)
     const top = clips.filter(clip => (clip.play_count || 0) > 0).sort((a,b) => (b.play_count || 0) - (a.play_count || 0) || a.name.localeCompare(b.name)).slice(0,20)
-    return [pinned, frequent, top, clips]
+    const newest = (a: Clip, b: Clip) => (b.created_at || 0) - (a.created_at || 0) || a.id.localeCompare(b.id)
+    return [pinned.sort(newest), frequent.sort(newest), top.sort(newest), [...clips].sort(newest)]
   }, [clips])
   useEffect(() => {
     if (!menu) return

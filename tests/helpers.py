@@ -25,7 +25,8 @@ def authenticated_fixture(app: FastAPI) -> None:
         profile = db.one("SELECT * FROM users WHERE id='100'")
         profile.update(
             admin=True,
-            permissions=effective_permissions({}, admin=True),
+            protected_admin=True,
+            permissions=effective_permissions(json.loads(profile["permission_overrides"]), admin=True),
             csrf="fixture-csrf",
             guilds=[{"id": "1352422295402057759", "name": "Test server"}],
             preferences={

@@ -181,8 +181,9 @@ current target-server membership through the normal bot API and checks channel p
 Dashboard membership reads share a five-minute cache; playback does not call the rate-limited OAuth membership endpoint. Discord outages fail closed
 without deleting account history.
 
-Only Discord users explicitly configured in `.env` can access `/admin`, using
-`APP_ADMIN_IDS=["DISCORD_USER_ID"]`. Server owners/admins do not automatically
+Users with the **Access admin panel** permission can access `/admin`.
+`APP_ADMIN_IDS=["DISCORD_USER_ID"]` defines protected administrators whose
+admin access cannot be disabled. Server owners/admins do not automatically
 become app admins, and app admins must also satisfy configured-server eligibility.
 
 `/settings` includes profile, personal preview volume, caption language, logout and logout-all. `/admin` contains application settings and a live console of sanitized website/bot logs. The console keeps up to 2,000 entries in memory until restart; error entries include stack traces. App admins can change import
@@ -194,13 +195,15 @@ supported in the configured server with one connection and master volume.
 The admin console stays above the **Settings** and **Permissions** tabs. Use
 `/admin?tab=settings` or `/admin?tab=permissions`; the selected tab survives
 reload and browser navigation without resetting the console. Permissions lists
-registered users with search and 50-user pagination. Select a user; permission switches update immediately, or reset them to defaults. Configured `.env` admins always have
-protected full access and cannot be changed through this interface.
+registered users with search and 50-user pagination. Select a user; permission switches update immediately, or reset them to defaults. Configured `.env` admins start with full access. Only the protected user can change
+their own other permissions for testing; admin access remains locked on. Reset
+restores their full access. Other administrators cannot modify protected accounts.
+Admin panel access does not bypass other permissions.
 
 Permissions cover playing/stopping sounds, voice connection/disconnection,
 master volume, mute/deafen, creating/editing/deleting sounds, video/channel
 imports, import-job management, video deletion, and audit access. Defaults allow
-everything except master volume and mute/deafen. Edit/delete all includes the user's own sounds;
+everything except admin access, boosted sound volume, master volume and mute/deafen. Edit/delete all includes the user's own sounds;
 unattributed legacy sounds require the corresponding all-sounds permission.
 Retrying an import also requires its import permission; resuming a channel
 requires channel import and job management. Browser previews, browsing,
@@ -468,3 +471,14 @@ Soundboard sections appear in this order: Pinned, Frequently used, Top sounds, A
 Conversation triggers support Play sound or Stop all sounds, with a 0–60 second delay separate from cooldown. Delays run in a bounded set of 32 pending actions without blocking transcription. Ending a session cancels pending actions; editing, disabling or deleting a trigger prevents its pending action from firing. Creator permissions and active-channel access are checked at execution. Stop all requires stop-sounds permission and stops the shared mixer; browser previews are unaffected. Existing triggers keep immediate sound playback through additive action/delay columns. Conversation and trigger deletions use themed confirmation dialogs.
 
 Conversation is labelled BETA. The transcription worker uses faster-whisper large-v3-turbo on CPU INT8 with four threads, beam size five and Dutch by default. The model is cached in the existing persistent volume; the first load downloads the larger model. Actual Dutch microphone accuracy still requires a user-controlled live test.
+
+Soundboard sections display sounds newest first by creation time. Frequently used
+and Top sounds select their highest-ranked 20 sounds, then display that selection
+newest first. Sound volume sliders always show 0–1000%; without the **Boost sound
+volume to 1000%** permission they stop at 300%. The higher segment is visibly
+restricted. Creation, upload and editing APIs enforce the same permission and
+absolute 1000% limit. Browser previews still cap gain at 100%.
+
+New cuts from the video editor always start at 100% volume. Adjust volume later
+in the sound editor. Permission edits update the selected user locally without
+refetching the user list; searching or changing pages still loads the matching users.

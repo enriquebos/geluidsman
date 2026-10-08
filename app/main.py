@@ -37,6 +37,7 @@ MAX_TAG_LENGTH = 30
 MIN_CLIP_SECONDS = 0.1
 MAX_DISCORD_ID_LENGTH = 20
 VOICE_MEMBER_CACHE_SECONDS = 15
+STANDARD_CLIP_VOLUME = 3
 
 
 class ImportInput(BaseModel):
@@ -47,7 +48,7 @@ class ClipMeta(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     emoji: str = Field(default="", max_length=100)
     tags: list[str] = Field(default_factory=list, max_length=10)
-    volume: float = Field(default=1, ge=0, le=2, allow_inf_nan=False)
+    volume: float = Field(default=1, ge=0, le=10, allow_inf_nan=False)
 
     @field_validator("emoji")
     @classmethod
@@ -357,11 +358,17 @@ def register_channel_routes(app: FastAPI) -> None:
         return {"ok": True}
 
 
+def check_clip_volume(user: dict, volume: float) -> None:
+    if volume > STANDARD_CLIP_VOLUME and not user["permissions"].get("high_volume", False):
+        raise HTTPException(403, "Sound volume above 300% requires the boost sound volume permission.")
+
+
 def register_clip_routes(app: FastAPI, settings: Settings) -> None:
     api_options = {"dependencies": [Depends(authorize)]}
 
     @app.post("/api/clips", status_code=201, dependencies=[Depends(require_permission("create_sounds"))])
     async def clips(body: ClipInput, request: Request) -> dict[str, object]:
+        check_clip_volume(request.state.user, body.volume)
         source = app.state.db.one("SELECT * FROM sources WHERE id=?", (body.source_id,))
         if not source:
             raise HTTPException(404, "Source not found.")
@@ -387,6 +394,7 @@ def register_clip_routes(app: FastAPI, settings: Settings) -> None:
             values = ClipMeta.model_validate_json(metadata).model_dump()
         except ValidationError as error:
             raise HTTPException(422, "Enter a valid sound name, emoji, tags and volume.") from error
+        check_clip_volume(request.state.user, values["volume"])
         task = asyncio.current_task()
         app.state.clip_tasks.add(task)
         try:
@@ -417,6 +425,7 @@ def register_clip_routes(app: FastAPI, settings: Settings) -> None:
 
     @app.patch("/api/clips/{clip_id}", dependencies=[Depends(require_sound_permission("edit"))])
     async def edit_clip(clip_id: str, body: ClipMeta, request: Request) -> dict[str, object]:
+        check_clip_volume(request.state.user, body.volume)
         if not app.state.db.one("SELECT id FROM clips WHERE id=?", (clip_id,)):
             raise HTTPException(404, "Sound not found.")
         app.state.db.change(

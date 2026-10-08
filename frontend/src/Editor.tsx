@@ -27,7 +27,6 @@ export function Editor({ serverEmojis, canCreate, source, initialTime = 0, avail
   const [name, setName] = useState('')
   const [emoji, setEmoji] = useState('')
   const [tags, setTags] = useState<string[]>([])
-  const [volume, setVolume] = useState(1)
   const [saving, setSaving] = useState(false)
 
   function update(value: Selection) {
@@ -201,7 +200,7 @@ export function Editor({ serverEmojis, canCreate, source, initialTime = 0, avail
     event.preventDefault()
     setSaving(true)
     try {
-      await api('/clips', 'POST', { source_id: source.id, ...selection, name, emoji, tags, volume })
+      await api('/clips', 'POST', { source_id: source.id, ...selection, name, emoji, tags, volume: 1 })
       onSaved()
     } catch (error) { onError((error as Error).message) }
     finally { setSaving(false) }
@@ -237,6 +236,6 @@ export function Editor({ serverEmojis, canCreate, source, initialTime = 0, avail
     <div className="wave-footer"><span>{timeLabel(current)} / {timeLabel(source.duration)}</span><span>Drag selection to move · Slow down for 0.5s to zoom until release · Space previews cut</span></div>
     <div className="trim-controls"><label>Start <input aria-label="Start time" type="number" step="0.01" min="0" max={selection.end - .1} value={Number(selection.start.toFixed(2))} onChange={e => update({ ...selection, start: Number(e.target.value) })} /> <span>s</span></label><label>End <input aria-label="End time" type="number" step="0.01" min={selection.start + .1} max={source.duration} value={Number(selection.end.toFixed(2))} onChange={e => update({ ...selection, end: Number(e.target.value) })} /> <span>s</span></label><span className={`duration-pill ${valid ? '' : 'invalid'}`}>{length.toFixed(2)}s selected</span><button className="secondary-button" disabled={!ready} onClick={previewSelection}>{playing ? <Pause size={16} /> : <Play size={16} />} Preview cut</button></div>
     {!valid && <p className="field-error">Choose between 0.1 and {maxLength} seconds.</p>}
-    {canCreate && <form onSubmit={save} className="clip-form"><div className="form-row"><label>Sound name<input placeholder="Give this moment a name" required maxLength={255} value={name} onChange={e => setName(e.target.value)} /></label><EmojiPicker serverEmojis={serverEmojis} value={emoji} onChange={setEmoji} /></div><div className="form-row"><TagInput value={tags} onChange={setTags} available={availableTags} /><label className="volume-field">Clip volume <span className="muted">{Math.round(volume * 100)}%</span><input type="range" min="0" max="2" step="0.05" value={volume} onChange={e => setVolume(Number(e.target.value))} /></label></div><div className="form-action"><span><Check size={14} /> Your source video stays in the library.</span><button className="primary-button" disabled={!ready || !valid || saving || !name.trim()}>{saving ? 'Saving sound…' : 'Add to soundboard'} <Scissors size={16} /></button></div></form>}
+    {canCreate && <form onSubmit={save} className="clip-form"><div className="form-row"><label>Sound name<input placeholder="Give this moment a name" required maxLength={255} value={name} onChange={e => setName(e.target.value)} /></label><EmojiPicker serverEmojis={serverEmojis} value={emoji} onChange={setEmoji} /></div><div className="form-row"><TagInput value={tags} onChange={setTags} available={availableTags} /></div><div className="form-action"><span><Check size={14} /> Your source video stays in the library.</span><button className="primary-button" disabled={!ready || !valid || saving || !name.trim()}>{saving ? 'Saving sound…' : 'Add to soundboard'} <Scissors size={16} /></button></div></form>}
   </section>
 }

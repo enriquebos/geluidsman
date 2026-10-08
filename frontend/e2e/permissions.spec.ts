@@ -36,7 +36,7 @@ test('registered user permissions save, persist, reset and appear in audit detai
     await page.getByRole('button', { name: 'Permissions for Fixture Member', exact: true }).click()
     await expect(page.getByRole('switch', { name: 'Play sounds', exact: true })).toHaveAccessibleDescription('Play sounds from the soundboard in the Discord voice channel.')
     await page.getByRole('switch', { name: 'Play sounds', exact: true }).uncheck()
-    await expect(page.getByRole('switch', { name: 'Mute or deafen the bot', exact: true })).toBeEnabled()
+    await expect(page.getByRole('switch', { name: 'Mute or deafen the bot', exact: true })).toHaveAttribute('aria-disabled', 'false')
     await page.getByRole('switch', { name: 'Mute or deafen the bot', exact: true }).check()
     await expect(page.locator('.toast')).toContainText('Permissions saved for Fixture Member.')
     const saved = (await (await request.get('/api/admin/users?q=Fixture')).json()).users[0]
@@ -52,8 +52,9 @@ test('registered user permissions save, persist, reset and appear in audit detai
     await expect(page.getByRole('switch', { name: 'Mute or deafen the bot', exact: true })).not.toBeChecked()
     await page.getByLabel('Search permission users').fill('Test Member')
     await page.getByRole('button', { name: 'Permissions for Test Member', exact: true }).click()
-    await expect(page.getByText('Configured administrator · protected full access', { exact: true })).toBeVisible()
-    await expect(page.getByRole('switch', { name: 'Play sounds', exact: true })).toBeDisabled()
+    await expect(page.getByText('Protected administrator · only you can change your permissions', { exact: true })).toBeVisible()
+    await expect(page.getByRole('switch', { name: 'Play sounds', exact: true })).toBeEnabled()
+    await expect(page.getByRole('switch', { name: 'Access admin panel', exact: true })).toBeDisabled()
     await expect(page.getByRole('button', { name: 'Save permissions', exact: true })).toHaveCount(0)
     await page.goto('/audit')
     await page.getByRole('button', { name: 'Action', exact: true }).click()
@@ -129,4 +130,42 @@ test('restricted users retain previews and favourites, get ownership controls an
     await expect(page.locator('.voice-toggles')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Admin', exact: true })).toHaveCount(0)
   } finally { await request.delete(`/api/clips/${ownId}`); await request.delete(`/api/clips/${otherId}`) }
+})
+
+
+test('protected administrator can test own permissions while admin access remains locked', async ({ page, request }, testInfo) => {
+  let stateRequests = 0
+  let userListRequests = 0
+  page.on('request', request => { const path = new URL(request.url()).pathname; if (path === '/api/state') stateRequests++; if (path === '/api/admin/users') userListRequests++ })
+  try {
+    await page.goto('/admin?tab=permissions')
+    await page.getByLabel('Search permission users').fill('Test Member')
+    await page.getByRole('button', { name: 'Permissions for Test Member', exact: true }).click()
+    await expect(page.getByRole('switch', { name: 'Access admin panel', exact: true })).toBeDisabled()
+    await page.getByRole('switch', { name: 'Play sounds', exact: true }).uncheck()
+    await expect(page.locator('.toast')).toContainText('Permissions saved for Test Member.')
+    const beforeRequests = stateRequests
+    const beforeUserListRequests = userListRequests
+    await page.locator('.console-output').evaluate(element => { Object.assign(window, { permissionConsole: element }) })
+    for (const name of ['Boost sound volume to 1000%', 'Mute or deafen the bot', 'Change master volume']) {
+      await page.getByRole('switch', { name, exact: true }).uncheck()
+      await expect(page.getByRole('switch', { name, exact: true })).toHaveAttribute('aria-disabled', 'false')
+      await expect(page.getByRole('switch', { name, exact: true })).not.toBeChecked()
+      if (testInfo.project.name === 'desktop') await expect(page.getByRole('switch', { name, exact: true })).toBeFocused()
+    }
+    expect(stateRequests).toBe(beforeRequests)
+    expect(userListRequests).toBe(beforeUserListRequests)
+    await expect(page.getByRole('button', { name: 'Permissions for Test Member', exact: true })).toBeEnabled()
+    expect(await page.locator('.console-output').evaluate(element => (window as unknown as { permissionConsole: Element }).permissionConsole === element)).toBe(true)
+    const user = await (await request.get('/api/auth/me')).json()
+    for (const key of ['high_volume', 'mute_deafen', 'master_volume']) expect(user.permissions[key]).toBe(false)
+    expect(user.admin).toBe(true)
+    expect(user.permissions.play_sounds).toBe(false)
+    await page.reload()
+    await page.getByRole('button', { name: 'Permissions for Test Member', exact: true }).click()
+    await expect(page.getByRole('switch', { name: 'Play sounds', exact: true })).not.toBeChecked()
+    for (const name of ['Boost sound volume to 1000%', 'Mute or deafen the bot', 'Change master volume']) await expect(page.getByRole('switch', { name, exact: true })).not.toBeChecked()
+    await page.getByRole('button', { name: 'Reset to defaults', exact: true }).click()
+    await expect(page.getByRole('switch', { name: 'Play sounds', exact: true })).toBeChecked()
+  } finally { await request.delete('/api/admin/users/100/permissions') }
 })

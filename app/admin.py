@@ -27,9 +27,10 @@ class PermissionOverrides(BaseModel):
 
 
 def user_permissions(app: FastAPI, user: dict) -> dict:
-    user["admin"] = user["id"] in app.state.auth.admin_ids
+    user["protected_admin"] = user["id"] in app.state.auth.admin_ids
     user["overrides"] = json.loads(user.pop("permission_overrides"))
-    user["permissions"] = effective_permissions(user["overrides"], admin=user["admin"])
+    user["permissions"] = effective_permissions(user["overrides"], admin=user["protected_admin"])
+    user["admin"] = user["permissions"]["admin"]
     return user
 
 
@@ -39,10 +40,13 @@ def update_permissions(app: FastAPI, request: Request, user_id: str, overrides: 
         user = db.one("SELECT id,display_name,permission_overrides FROM users WHERE id=?", (user_id,))
         if not user:
             raise HTTPException(404, "User not found.")
-        if user_id in app.state.auth.admin_ids:
-            raise HTTPException(409, "Configured administrators have protected full access.")
-        previous = effective_permissions(json.loads(user["permission_overrides"]))
-        updated = effective_permissions(overrides)
+        protected = user_id in app.state.auth.admin_ids
+        if protected and request.state.user["id"] != user_id:
+            raise HTTPException(403, "Only this protected administrator can change their own permissions.")
+        if protected and overrides.get("admin") is False:
+            raise HTTPException(409, "Protected administrator access cannot be disabled.")
+        previous = effective_permissions(json.loads(user["permission_overrides"]), admin=protected)
+        updated = effective_permissions(overrides, admin=protected)
         changes = [
             {"permission": key, "label": label, "before": previous[key], "after": updated[key]}
             for key, label, _group in CATALOGUE
@@ -56,7 +60,7 @@ def update_permissions(app: FastAPI, request: Request, user_id: str, overrides: 
             user["display_name"],
             details={"target_user_id": user_id, "permission_changes": changes},
         )
-    app.state.events.publish("refresh")
+    app.state.events.publish("permissions", {"user_id": user_id})
     return {"permissions": updated, "overrides": overrides}
 
 

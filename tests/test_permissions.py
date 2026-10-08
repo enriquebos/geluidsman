@@ -120,14 +120,18 @@ def test_admin_permissions_validation_search_protection_and_audit(client: TestCl
         assert client.put(endpoint, json={"overrides": invalid}, headers=headers(user)).status_code == 422
     assert client.put(endpoint, json={"overrides": {}, "admin": True}, headers=headers(user)).status_code == 422
     assert (
-        client.put("/api/admin/users/100/permissions", json={"overrides": {}}, headers=headers(user)).status_code == 409
+        client.put(
+            "/api/admin/users/100/permissions", json={"overrides": {"admin": False}}, headers=headers(user)
+        ).status_code
+        == 409
     )
-    assert client.delete("/api/admin/users/100/permissions", headers=headers(user)).status_code == 409
     assert client.delete("/api/admin/users/missing/permissions", headers=headers(user)).status_code == 404
+    client.app.state.events.publish = Mock()
     response = client.put(
         endpoint, json={"overrides": {"mute_deafen": True, "play_sounds": False}}, headers=headers(user)
     )
     assert response.status_code == 200
+    client.app.state.events.publish.assert_called_once_with("permissions", {"user_id": "200"})
     assert response.json()["permissions"]["mute_deafen"]
     assert not response.json()["permissions"]["play_sounds"]
     assert client.get("/api/admin/users?q=Other").json()["total"] == 1
@@ -243,3 +247,62 @@ def test_admin_user_pagination(client: TestClient) -> None:
     assert len(first["users"]) == 50
     assert len(second["users"]) == 1
     assert not {user["id"] for user in first["users"]} & {user["id"] for user in second["users"]}
+
+
+def test_delegated_admin_and_protected_self_permissions(client: TestClient) -> None:
+    user = login(client)
+    override(client, {"admin": True, "play_sounds": False})
+    profile = client.get("/api/auth/me").json()
+    assert profile["admin"]
+    assert not profile["protected_admin"]
+    assert not profile["permissions"]["play_sounds"]
+    assert not profile["permissions"]["high_volume"]
+    assert client.get("/api/admin/permissions").status_code == 200
+    assert client.post(f"/api/guilds/{GUILD}/clips/clip/play", headers=headers(user)).status_code == 403
+    add_user(client)
+    client.app.state.auth.admin_ids.add("200")
+    target = "/api/admin/users/200/permissions"
+    assert client.put(target, json={"overrides": {"play_sounds": False}}, headers=headers(user)).status_code == 403
+    assert client.delete(target, headers=headers(user)).status_code == 403
+    client.app.state.auth.admin_ids.add("100")
+    target = "/api/admin/users/100/permissions"
+    result = client.put(target, json={"overrides": {"play_sounds": False}}, headers=headers(user))
+    assert result.status_code == 200
+    assert result.json()["permissions"]["admin"]
+    assert not client.get("/api/auth/me").json()["permissions"]["play_sounds"]
+    assert client.put(target, json={"overrides": {"admin": False}}, headers=headers(user)).status_code == 409
+    assert all(client.delete(target, headers=headers(user)).json()["permissions"].values())
+    client.app.state.auth.admin_ids.remove("100")
+    assert client.get("/api/admin/permissions").status_code == 403
+
+
+@pytest.mark.parametrize("volume", [3.05, 10])
+def test_boost_volume_permission_on_all_writes(client: TestClient, volume: float) -> None:
+    user = login(client)
+    db = client.app.state.db
+    db.execute(
+        "INSERT INTO sources(id,url,title,duration,created_at) VALUES (?,?,?,?,?)",
+        ("source", "https://example.com", "Source", 10, 1),
+    )
+    db.execute(
+        "INSERT INTO clips(id,source_id,name,emoji,tags,start,end,volume,created_at,creator_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("sound", "source", "Sound", "", "[]", 0, 1, 1, 1, "100"),
+    )
+    payload = {"name": "Sound", "volume": volume}
+    extraction = {**payload, "source_id": "source", "start": 0, "end": 1}
+    metadata = {"filename": "sound.mp3", "metadata": json.dumps(payload)}
+    assert client.patch("/api/clips/sound", json=payload, headers=headers(user)).status_code == 403
+    assert client.post("/api/clips", json=extraction, headers=headers(user)).status_code == 403
+    assert client.post("/api/clips/upload", params=metadata, content=b"audio", headers=headers(user)).status_code == 403
+    override(client, {"high_volume": True})
+    media = client.app.state.media
+    media.create_clip = AsyncMock(return_value="created")
+    media.upload_clip = AsyncMock(return_value="uploaded")
+    assert client.patch("/api/clips/sound", json=payload, headers=headers(user)).status_code == 200
+    assert db.one("SELECT volume FROM clips WHERE id='sound'")["volume"] == volume
+    assert client.post("/api/clips", json=extraction, headers=headers(user)).status_code == 201
+    assert client.post("/api/clips/upload", params=metadata, content=b"audio", headers=headers(user)).status_code == 201
+    assert client.patch("/api/clips/sound", json={**payload, "volume": 10.05}, headers=headers(user)).status_code == 422
+    override(client, {})
+    assert client.patch("/api/clips/sound", json=payload, headers=headers(user)).status_code == 403

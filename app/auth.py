@@ -316,10 +316,11 @@ class Auth:
                 )
             self.touch_session(session, now)
             user = self.db.one("SELECT * FROM users WHERE id=?", (session["user_id"],))
-            user["admin"] = user["id"] in self.admin_ids
+            user["protected_admin"] = user["id"] in self.admin_ids
             user["permissions"] = effective_permissions(
-                json.loads(user.pop("permission_overrides")), admin=user["admin"]
+                json.loads(user.pop("permission_overrides")), admin=user["protected_admin"]
             )
+            user["admin"] = user["permissions"]["admin"]
             user["preferences"] = {
                 "preview_volume": 0.8,
                 "caption_language": "all",
