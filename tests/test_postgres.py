@@ -74,10 +74,8 @@ def test_postgres_api(database: Database, tmp_path: Path) -> None:
         authenticated_fixture(app)
         app.state.db.save_source(source(), [track()])
         for endpoint in (
-            "/api/conversations",
             "/api/conversations/status",
             "/api/conversation/triggers",
-            "/api/admin/conversations/settings",
             "/api/state",
             "/api/admin/users",
             "/api/captions/search?q=Hallo",
@@ -96,8 +94,9 @@ def test_postgres_api(database: Database, tmp_path: Path) -> None:
             "text,language) VALUES (?,?,?,?,?,?,?,?)",
             ("message", "session", "100", "Member", time.time(), time.time(), "Hallo", "nl"),
         )
+        app.state.conversation.session = app.state.db.one("SELECT * FROM conversations WHERE id='session'")
         assert client.get("/api/conversations/session/messages").json()["items"][0]["text"] == "Hallo"
-        assert client.delete("/api/conversations/session").status_code == 200
+        assert client.put("/api/conversations/recording", json={"enabled": False}).status_code == 200
         assert not app.state.db.rows("SELECT * FROM conversation_messages")
         app.state.db.audit("100", "sound.play")
         activity = client.get("/api/audit/activity", params={"after": time.time() - 3600, "until": time.time() + 1})

@@ -1,27 +1,11 @@
 import { expect, test } from '@playwright/test'
 
-test('conversation deletion uses themed confirmation and triggers support delayed stop-all', async ({ page, request }, testInfo) => {
-  const session = { id: 'theme-session', channel_name: 'Voice room', started_at: Date.now()/1000, ended_at: Date.now()/1000 }
-  await page.route('**/api/conversations?page=*', route => route.fulfill({ json: { items: [session], pages: 1, total: 1 } }))
-  await page.route('**/api/conversations/theme-session/messages', route => route.fulfill({ json: { session, items: [], has_older: false } }))
-  let deletes = 0
-  await page.route('**/api/conversations/theme-session', route => { deletes++; return route.fulfill({ json: { ok: true } }) })
-  await page.goto('/conversation?session=theme-session')
-  await page.getByRole('button', { name: 'Delete conversation', exact: true }).click()
-  const confirmation = page.getByRole('dialog', { name: 'Delete conversation?' })
-  await expect(confirmation).toContainText('cannot be undone')
-  await expect(confirmation).toHaveClass(/modal/)
-  await page.keyboard.press('Escape')
-  await expect(confirmation).not.toBeVisible()
-  expect(deletes).toBe(0)
-  await page.getByRole('button', { name: 'Delete conversation', exact: true }).click()
-  await confirmation.getByRole('button', { name: 'Delete conversation', exact: true }).click()
-  await expect(confirmation).not.toBeVisible()
-  expect(deletes).toBe(1)
+test('live-only conversation removes retention settings and supports delayed stop-all', async ({ page, request }, testInfo) => {
+  await page.goto('/conversation')
   await page.getByRole('button', { name: 'New trigger', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'New trigger', exact: true })
   const phrase = `Stop test ${testInfo.project.name}`
-  await dialog.getByLabel('Word or phrase').fill(phrase)
+  await dialog.getByLabel('Word or phrase 1', { exact: true }).fill(phrase)
   await dialog.getByLabel('Trigger action').selectOption('stop_all')
   await expect(dialog.getByRole('button', { name: 'Trigger sound', exact: true })).toHaveCount(0)
   await dialog.getByLabel('Delay (seconds)').fill('1.5')
@@ -36,8 +20,6 @@ test('conversation deletion uses themed confirmation and triggers support delaye
   await request.delete(`/api/conversation/triggers/${triggers.find((value: { phrase: string }) => value.phrase === phrase).id}`)
   await page.goto('/admin?tab=settings')
   const panels = page.locator('.admin-settings-sections > .settings-panel')
-  await expect(panels).toHaveCount(2)
-  const first = await panels.nth(0).boundingBox()
-  const second = await panels.nth(1).boundingBox()
-  expect(second!.y - first!.y - first!.height).toBeGreaterThanOrEqual(30)
+  await expect(panels).toHaveCount(1)
+  await expect(page.getByRole('heading', { name: 'Conversation retention', exact: true })).toHaveCount(0)
 })

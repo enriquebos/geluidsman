@@ -36,11 +36,14 @@ USER app
 CMD ["pytest", "-o", "cache_dir=/tmp/pytest-cache"]
 
 FROM dependencies AS transcription-dependencies
-RUN --mount=type=cache,target=/root/.cache/pypoetry poetry install --only worker --no-interaction
+RUN --mount=type=cache,target=/root/.cache/pypoetry poetry install --only main,worker,gpu --no-interaction
 
 FROM app AS transcription
 USER root
 COPY --from=transcription-dependencies /opt/venv /opt/venv
-RUN mkdir /models && chown app:app /models
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && mkdir /models && chown app:app /models
+ENV LD_LIBRARY_PATH="/opt/venv/lib/python3.12/site-packages/nvidia/cublas/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cudnn/lib"
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 USER app
 CMD ["python", "-m", "app.transcription_worker"]

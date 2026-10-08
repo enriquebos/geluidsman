@@ -5,6 +5,7 @@ import json
 import time
 from typing import TYPE_CHECKING, Annotated, Literal
 
+import aiohttp
 from fastapi import Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
@@ -14,9 +15,16 @@ from app.permissions import require_permission
 
 MAX_DISCORD_ID = 20
 MESSAGE_PAGE_SIZE = 100
+MAX_TRIGGER_TERMS = 20
+MAX_TRIGGER_TERM_LENGTH = 255
+MAX_TRIGGER_TEXT_LENGTH = MAX_TRIGGER_TERMS * (MAX_TRIGGER_TERM_LENGTH + 1) - 1
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
+
+
+class TranscriptionInput(BaseModel):
+    model: Literal["large-v3-turbo", "large-v3"]
 
 
 class RecordingInput(BaseModel):
@@ -27,15 +35,11 @@ class LanguageInput(BaseModel):
     language: Literal["nl", "en", "auto"]
 
 
-class RetentionInput(BaseModel):
-    days: int = Field(30, ge=1, le=3650)
-
-
 class TriggerInput(BaseModel):
     clip_id: str = Field(default="", max_length=100)
     action: Literal["play", "stop_all"] = "play"
     delay: float = Field(0, ge=0, le=60, allow_inf_nan=False)
-    phrase: str = Field(min_length=1, max_length=255)
+    phrase: str = Field(min_length=1, max_length=MAX_TRIGGER_TEXT_LENGTH)
     mode: Literal["word", "contains"] = "word"
     target: Literal["everyone", "self", "selected"] = "everyone"
     speakers: list[str] = Field(default_factory=list, max_length=64)
@@ -45,10 +49,17 @@ class TriggerInput(BaseModel):
     @field_validator("phrase")
     @classmethod
     def phrase_not_blank(cls, value: str) -> str:
-        if not value.strip():
-            message = "Enter a word or phrase."
+        terms = [" ".join(term.split()) for term in value.splitlines() if term.strip()]
+        if not terms:
+            message = "Enter at least one word or phrase."
             raise ValueError(message)
-        return value.strip()
+        if len(terms) > MAX_TRIGGER_TERMS or any(len(term) > MAX_TRIGGER_TERM_LENGTH for term in terms):
+            message = "Use up to 20 words or phrases, with at most 255 characters each."
+            raise ValueError(message)
+        unique = {}
+        for term in terms:
+            unique.setdefault(term.casefold(), term)
+        return "\n".join(unique.values())
 
     @field_validator("speakers")
     @classmethod
@@ -61,26 +72,33 @@ class TriggerInput(BaseModel):
 
 def register_conversation_routes(app: FastAPI) -> None:
     register_trigger_routes(app)
-    register_conversation_admin(app)
+    register_transcription_routes(app)
 
     @app.get("/api/conversations/status", dependencies=[Depends(require_permission("view_conversations"))])
     async def conversation_status() -> dict:
         return app.state.conversation.snapshot()
 
-    @app.put("/api/conversations/recording", dependencies=[Depends(require_permission("control_recording"))])
+    @app.put(
+        "/api/conversations/recording",
+        dependencies=[Depends(require_permission("view_conversations", "control_recording"))],
+    )
     async def recording(body: RecordingInput, request: Request) -> dict:
         manager = app.state.conversation
         await asyncio.to_thread(app.state.db.set_setting, "conversation_enabled", body.enabled)
         manager.enabled = body.enabled
         if not body.enabled:
             await manager.close_session()
+            await asyncio.to_thread(app.state.db.execute, "DELETE FROM conversations")
         await asyncio.to_thread(
             app.state.db.audit, request.state.user["id"], "conversation.recording", details=body.model_dump()
         )
         app.state.events.publish("conversation")
         return {"enabled": manager.enabled}
 
-    @app.put("/api/conversations/language", dependencies=[Depends(require_permission("control_recording"))])
+    @app.put(
+        "/api/conversations/language",
+        dependencies=[Depends(require_permission("view_conversations", "control_recording"))],
+    )
     async def language(body: LanguageInput, request: Request) -> dict:
         await asyncio.to_thread(app.state.db.set_setting, "conversation_language", body.language)
         app.state.conversation.language = body.language
@@ -90,24 +108,14 @@ def register_conversation_routes(app: FastAPI) -> None:
         app.state.events.publish("conversation")
         return {"language": body.language}
 
-    @app.get("/api/conversations", dependencies=[Depends(require_permission("view_conversations"))])
-    def sessions(page: Annotated[int, Query(ge=1)] = 1) -> dict:
-        db = app.state.db
-        total = db.one("SELECT COUNT(*) AS total FROM conversations")["total"]
-        return {
-            "items": db.rows(
-                "SELECT * FROM conversations ORDER BY started_at DESC,id DESC LIMIT 50 OFFSET ?", ((page - 1) * 50,)
-            ),
-            "total": total,
-            "page": page,
-            "pages": max(1, (total + 49) // 50),
-        }
-
     @app.get(
         "/api/conversations/{session_id}/messages", dependencies=[Depends(require_permission("view_conversations"))]
     )
     def messages(session_id: str, before: Annotated[str | None, Query(max_length=100)] = None) -> dict:
         db = app.state.db
+        manager = app.state.conversation
+        if not manager.enabled or not manager.session or manager.session["id"] != session_id:
+            raise HTTPException(404, "Live conversation not found.")
         session = db.one("SELECT * FROM conversations WHERE id=?", (session_id,))
         if not session:
             raise HTTPException(404, "Conversation not found.")
@@ -129,23 +137,24 @@ def register_conversation_routes(app: FastAPI) -> None:
 
 
 def register_trigger_routes(app: FastAPI) -> None:
-    @app.get("/api/conversation/triggers", dependencies=[Depends(require_permission("manage_triggers"))])
-    def triggers(request: Request) -> dict:
-        user = request.state.user
+    @app.get("/api/conversation/triggers", dependencies=[Depends(require_permission("view_conversations"))])
+    def triggers() -> dict:
         rows = app.state.db.rows(
             "SELECT t.*,u.display_name AS owner_name,c.name AS sound_name,c.emoji AS emoji "
             "FROM conversation_triggers t "
-            "JOIN users u ON u.id=t.owner_id LEFT JOIN clips c ON c.id=t.clip_id WHERE (?=1 OR t.owner_id=?) "
+            "JOIN users u ON u.id=t.owner_id LEFT JOIN clips c ON c.id=t.clip_id "
             "ORDER BY t.created_at,t.id",
-            (int(user["admin"]), user["id"]),
         )
         for row in rows:
             row["speakers"] = json.loads(row["speakers"])
             row["enabled"] = bool(row["enabled"])
+            row["phrases"] = row["phrase"].splitlines()
         return {"items": rows}
 
     @app.post(
-        "/api/conversation/triggers", status_code=201, dependencies=[Depends(require_permission("manage_triggers"))]
+        "/api/conversation/triggers",
+        status_code=201,
+        dependencies=[Depends(require_permission("view_conversations", "manage_triggers"))],
     )
     def create_trigger(body: TriggerInput, request: Request) -> dict:
         check_trigger(app, body)
@@ -175,9 +184,12 @@ def register_trigger_routes(app: FastAPI) -> None:
         app.state.events.publish("conversation")
         return {"id": trigger_id}
 
-    @app.put("/api/conversation/triggers/{trigger_id}", dependencies=[Depends(require_permission("manage_triggers"))])
+    @app.put(
+        "/api/conversation/triggers/{trigger_id}",
+        dependencies=[Depends(require_permission("view_conversations", "manage_triggers"))],
+    )
     def update_trigger(trigger_id: str, body: TriggerInput, request: Request) -> dict:
-        owned(app, trigger_id, request)
+        existing_trigger(app, trigger_id)
         check_trigger(app, body)
         app.state.db.change(
             "UPDATE conversation_triggers SET clip_id=?,phrase=?,mode=?,target=?,speakers=?,"
@@ -204,7 +216,8 @@ def register_trigger_routes(app: FastAPI) -> None:
         return {"ok": True}
 
     @app.delete(
-        "/api/conversation/triggers/{trigger_id}", dependencies=[Depends(require_permission("manage_triggers"))]
+        "/api/conversation/triggers/{trigger_id}",
+        dependencies=[Depends(require_permission("view_conversations", "manage_triggers"))],
     )
     def delete_trigger(trigger_id: str, request: Request) -> dict:
         trigger = owned(app, trigger_id, request)
@@ -220,37 +233,28 @@ def register_trigger_routes(app: FastAPI) -> None:
         return {"ok": True}
 
 
-def register_conversation_admin(app: FastAPI) -> None:
-    @app.get("/api/admin/conversations/settings", dependencies=[Depends(authorize_admin)])
-    def retention() -> dict:
-        return {"days": app.state.db.setting("conversation_retention_days", 30)}
+def register_transcription_routes(app: FastAPI) -> None:
+    @app.get("/api/admin/transcription", dependencies=[Depends(authorize_admin)])
+    async def transcription_status() -> dict:
+        return await app.state.conversation.synchronize_model()
 
-    @app.put("/api/admin/conversations/settings", dependencies=[Depends(authorize_admin)])
-    def save_retention(body: RetentionInput, request: Request) -> dict:
-        app.state.db.set_setting("conversation_retention_days", body.days)
-        app.state.db.audit(request.state.user["id"], "conversation.retention", details=body.model_dump())
-        app.state.events.publish("conversation")
-        return body.model_dump()
-
-    @app.delete("/api/conversations/{session_id}", dependencies=[Depends(authorize_admin)])
-    async def delete_session(session_id: str, request: Request) -> dict:
+    @app.put("/api/admin/transcription", dependencies=[Depends(authorize_admin)])
+    async def transcription_model(body: TranscriptionInput, request: Request) -> dict:
         manager = app.state.conversation
-        if manager.session and manager.session["id"] == session_id:
-            raise HTTPException(409, "Disable recording before deleting the active conversation.")
-        session = await asyncio.to_thread(app.state.db.one, "SELECT * FROM conversations WHERE id=?", (session_id,))
-        if not session:
-            raise HTTPException(404, "Conversation not found.")
+        status = await manager.synchronize_model()
+        if status.get("target"):
+            raise HTTPException(409, "Wait for the current model switch to finish.")
+        if not status.get("ready"):
+            raise HTTPException(503, "Transcription worker is unavailable or still loading.")
+        try:
+            status = await manager.select_model(body.model)
+        except (aiohttp.ClientError, TimeoutError, ValueError) as error:
+            raise HTTPException(503, "Could not request the model switch. The current model is unchanged.") from error
         await asyncio.to_thread(
-            app.state.db.change,
-            "DELETE FROM conversations WHERE id=?",
-            (session_id,),
-            request.state.user["id"],
-            "conversation.delete",
-            resource_id=session_id,
-            name=session["channel_name"],
+            app.state.db.audit, request.state.user["id"], "settings.edit", details=body.model_dump()
         )
         app.state.events.publish("conversation")
-        return {"ok": True}
+        return status
 
 
 def check_trigger(app: FastAPI, body: TriggerInput) -> None:
@@ -260,10 +264,15 @@ def check_trigger(app: FastAPI, body: TriggerInput) -> None:
         raise HTTPException(422, "Select at least one speaker.")
 
 
-def owned(app: FastAPI, trigger_id: str, request: Request) -> dict:
+def existing_trigger(app: FastAPI, trigger_id: str) -> dict:
     trigger = app.state.db.one("SELECT * FROM conversation_triggers WHERE id=?", (trigger_id,))
     if not trigger:
         raise HTTPException(404, "Trigger not found.")
+    return trigger
+
+
+def owned(app: FastAPI, trigger_id: str, request: Request) -> dict:
+    trigger = existing_trigger(app, trigger_id)
     if not request.state.user["admin"] and trigger["owner_id"] != request.state.user["id"]:
         raise HTTPException(403, "You can only manage your own triggers.")
     return trigger

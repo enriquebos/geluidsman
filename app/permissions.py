@@ -26,13 +26,14 @@ CATALOGUE = [
     ("import_channels", "Import channels", "Library"),
     ("manage_imports", "Manage import jobs", "Library"),
     ("delete_videos", "Delete videos", "Library"),
-    ("view_conversations", "View conversations", "Conversation"),
+    ("view_conversations", "Access Conversation page", "Conversation"),
     ("control_recording", "Enable or disable recording", "Conversation"),
-    ("manage_triggers", "Manage personal sound triggers", "Conversation"),
+    ("manage_triggers", "Manage sound triggers", "Conversation"),
     ("view_audit", "View audit log", "Activity"),
 ]
 DEFAULTS = {
-    key: key not in {"admin", "high_volume", "mute_deafen", "master_volume"} for key, _label, _group in CATALOGUE
+    key: key not in {"admin", "high_volume", "mute_deafen", "master_volume", "view_conversations"}
+    for key, _label, _group in CATALOGUE
 }
 
 

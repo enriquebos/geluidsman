@@ -34,7 +34,7 @@ test('Escape closes upload and trigger dialogs from inputs, closing nested picke
   await page.goto('/conversation')
   await page.getByRole('button', { name: 'New trigger' }).click()
   const trigger = page.getByRole('dialog', { name: 'New trigger' })
-  await trigger.getByLabel('Word or phrase').fill('Test')
+  await trigger.getByLabel('Word or phrase 1', { exact: true }).fill('Test')
   await page.keyboard.press('Escape')
   await expect(trigger).not.toBeVisible()
 })

@@ -441,13 +441,13 @@ Sanitized bot and website diagnostics also appear in `docker compose logs app`.
 
 ## Conversation transcripts and sound triggers
 
-Open `/conversation` to see live speech as chat bubbles, your own on the right and other speakers on the left. All eligible signed-in users can read history. The recording switch is shared and persists across restarts; recording is enabled by default but the app never joins a voice channel at startup. Connecting from Soundboard or Conversation starts transcription once the local model is ready. Recording status and included participants are visible on the Conversation page; the bot does not send transcript notices in voice-channel text chat. Disabling recording stops capture and triggers. Deafening the bot pauses recording until someone with voice-toggle permission undeafens it; changing channels or losing the voice connection ends the session.
+Open `/conversation` to see live speech as chat bubbles, your own on the right and other speakers on the left. Users granted Access Conversation page can read history; this permission is off by default for ordinary users. The navigation item is hidden when access is denied, and direct API requests are also checked. Protected administrators keep their existing full-access defaults. The recording switch is shared and persists across restarts; recording is enabled by default but the app never joins a voice channel at startup. Connecting from Soundboard or Conversation starts transcription once the local model is ready. Recording status and included participants are visible on the Conversation page; the bot does not send transcript notices in voice-channel text chat. Disabling recording stops capture and triggers. Deafening the bot pauses recording until someone with voice-toggle permission undeafens it; changing channels or losing the voice connection ends the session.
 
-Dutch and English speech is recognized locally with faster-whisper's multilingual large-v3-turbo model. Audio exists only in bounded memory buffers and is not saved. Finalized transcript text, speaker identities and timestamps are kept in PostgreSQL for 30 days by default. Admin Settings can change retention; expired completed sessions are removed hourly. Admins can delete a saved conversation from the Conversation page. Transcript text and audio are excluded from logs and SSE payloads. Playback history records trigger and speaker IDs, with skipped-playback explanations.
+Dutch and English speech is recognized locally with faster-whisper's multilingual large-v3-turbo model. Audio exists only in bounded memory buffers and is not saved. Finalized transcript text, speaker identities and timestamps are available only during the active conversation. Closing the session, disabling recording or restarting the app deletes them. There is no saved conversation history or retention setting. Transcript text and audio are excluded from logs and SSE payloads. Playback history records trigger and speaker IDs, with skipped-playback explanations.
 
-The Compose transcription service uses its own image, four CPU threads, INT8 inference and a persistent transcription_models volume. Its HTTP interface has no published host port. The first start downloads the model; later starts reuse the volume. Run `docker compose up -d --build` for the full stack and `docker compose logs transcription` for worker startup diagnostics. `docker compose exec -T transcription python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health').read().decode())"` reports model readiness. TRANSCRIPTION_URL is an internal worker address, not the dashboard URL. Linux and Windows use the same stack; no GPU runtime is required. Back up PostgreSQL for transcript history and triggers. The model volume can be recreated from its upstream download.
+The Compose transcription service uses its own image, NVIDIA CUDA FP16 inference and a persistent transcription_models volume. The default stack reserves an NVIDIA GPU; Windows requires Docker Desktop with WSL2 GPU support, and Linux requires NVIDIA Container Toolkit. Its HTTP interface has no published host port. The first start downloads the model; later starts reuse the volume. Run `docker compose up -d --build` for the full stack and `docker compose logs transcription` for worker startup diagnostics. `docker compose exec -T transcription python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health').read().decode())"` reports model readiness. TRANSCRIPTION_URL is an internal worker address, not the dashboard URL. Linux and Windows use the same GPU stack. For machines without an NVIDIA GPU, use `docker compose -f compose.yaml -f compose.cpu.yaml up -d --build` to select CPU INT8 inference; use the same two Compose files for later stop or restart commands. Back up PostgreSQL for users, permissions, library data and triggers. The model volume can be recreated from its upstream download.
 
-Create word-to-sound triggers below the chat. Choose whole-word/phrase or contains matching, select everyone, yourself or specific Discord speakers, and set a cooldown (five seconds by default; zero is supported). Matching is case-insensitive and runs only on finalized speech. Each matched utterance fires a trigger once. Users manage their own triggers; admins oversee all triggers. Playback rechecks the creator's permissions and channel access, uses the existing mixer, and rejects full capacity instead of queuing stale sounds. The bot's incoming stream is excluded; human microphone echo and recognition mistakes can still activate triggers.
+Create word-to-sound triggers below the chat. Choose whole-word/phrase or contains matching, select everyone, yourself or specific Discord speakers, and set a cooldown (five seconds by default; zero is supported). Matching is case-insensitive and runs only on finalized speech. Each matched utterance fires a trigger once. Users with Conversation access can view all shared triggers, including their creator and enabled status. Anyone with Conversation access and trigger-management permission can edit or toggle any trigger, while its original creator remains unchanged. Deletion is restricted to the creator or admins with the relevant permissions. Playback rechecks the creator's permissions and channel access, uses the existing mixer, and rejects full capacity instead of queuing stale sounds. The bot's incoming stream is excluded; human microphone echo and recognition mistakes can still activate triggers.
 
 The receive extension is pinned to commit 78fcb434a3484f2abf54cf89e80e86b651e5c28d of discord-ext-voice-recv-dave. The receive integration uses Discord's normal bot connection and DAVE decryption, not a user account. Tests cover application capture, speaker separation, lifecycle and trigger behavior without joining Discord voice. A user-controlled live session is still required to validate encrypted audio reception in the actual server.
 
@@ -460,7 +460,7 @@ Caption search accepts partial final words and near spellings, with exact matche
 
 Conversation starts in Dutch to avoid misdetecting short Dutch utterances as English. Users with recording-control permission can select Dutch, English or automatic detection on the Conversation page; the shared selection persists across restarts. The same Discord connection controls are available on Soundboard and Conversation. Scrolling up in the admin console pauses Follow latest; enable it again to return to live logs.
 
-Live transcripts finalize after approximately 400 ms of silence. Continuous speech is split into bounded five-second segments, then processed by the same Dutch-default large-v3-turbo model. Completed transcript events fetch messages immediately without waiting for session history and trigger-list refreshes. Shorter segments reduce waiting but can affect recognition at boundaries; actual latency also depends on CPU throughput and transcription backlog.
+Live transcripts finalize after approximately 400 ms of silence. Continuous speech is split into bounded five-second segments, then processed by the same Dutch-default large-v3-turbo model. Completed transcript events fetch live messages immediately without waiting for trigger-list refreshes. Shorter segments reduce waiting but can affect recognition at boundaries; actual latency also depends on inference throughput and transcription backlog.
 
 The emoji picker uses Unicode Emoji 17.0 metadata from iamcal/emoji-data, pinned to commit 13ee711e222ea17fe537bfea953c687866f16411. The MIT license and dataset provenance are in frontend/src/data. It contains 1,878 standard emoji plus the configured server custom emoji, with left-side categories and alias search. Skin-tone variants remain excluded. Standard artwork depends on the browser and operating system. The catalog loads on demand.
 
@@ -470,7 +470,7 @@ Soundboard sections appear in this order: Pinned, Frequently used, Top sounds, A
 
 Conversation triggers support Play sound or Stop all sounds, with a 0–60 second delay separate from cooldown. Delays run in a bounded set of 32 pending actions without blocking transcription. Ending a session cancels pending actions; editing, disabling or deleting a trigger prevents its pending action from firing. Creator permissions and active-channel access are checked at execution. Stop all requires stop-sounds permission and stops the shared mixer; browser previews are unaffected. Existing triggers keep immediate sound playback through additive action/delay columns. Conversation and trigger deletions use themed confirmation dialogs.
 
-Conversation is labelled BETA. The transcription worker uses faster-whisper large-v3-turbo on CPU INT8 with four threads, beam size five and Dutch by default. The model is cached in the existing persistent volume; the first load downloads the larger model. Actual Dutch microphone accuracy still requires a user-controlled live test.
+Conversation is labelled BETA. The transcription worker uses faster-whisper large-v3-turbo on the GPU with FP16, beam size five and Dutch by default. CPU fallback retains four threads and INT8. The model is cached in the existing persistent volume; the first load downloads the larger model. Actual Dutch microphone accuracy still requires a user-controlled live test.
 
 Soundboard sections display sounds newest first by creation time. Frequently used
 and Top sounds select their highest-ranked 20 sounds, then display that selection
@@ -482,3 +482,37 @@ absolute 1000% limit. Browser previews still cap gain at 100%.
 New cuts from the video editor always start at 100% volume. Adjust volume later
 in the sound editor. Permission edits update the selected user locally without
 refetching the user list; searching or changing pages still loads the matching users.
+
+
+Finalized utterances wait at most 40 ms to collect a batch of up to four. The worker applies voice activity detection separately to each utterance and decodes independent audio regions together; speaker audio is never mixed. Automatic language mode detects each utterance separately and groups compatible languages. Queue and request bounds remain enforced, and session changes or stale results prevent transcript saving and trigger playback. The worker exposes `/transcribe/batch` only on the internal Compose network; its `/health` response reports readiness, requested device and maximum batch size without transcript content.
+
+The GPU dependencies are locked in Poetry's optional `gpu` group and included only in the transcription image. CUDA/cuDNN libraries are supplied by the image; the host needs a compatible NVIDIA driver. The model cache and PostgreSQL data volumes remain unchanged. GPU initialization failures remain visible through worker health and the conversation status; the default stack does not silently fall back to CPU.
+
+
+A local warmed-up benchmark on the Ryzen 7 9800X3D / RTX 5080 processed one five-second library sample in a median 2.810 seconds on the previous CPU INT8 worker and 0.187 seconds on GPU FP16. Four copies decoded together took 0.391 seconds per batch. These are inference/HTTP timings from three measured runs after warm-up, not end-to-end live-call latency or an accuracy benchmark. Finalization silence, batching wait, microphone quality, utterance length and system load still affect the user experience; batched decoding can produce different wording from individual decoding.
+
+
+Conversation triggers accept up to 20 alternative words or phrases, each in a separate input with up to 255 characters. Use Add word or phrase to add an entry and its remove button to delete it; at least one entry is required. Any entry can activate the action, using the selected whole-word/phrase or contains-text match mode. Entries share the trigger's speakers, cooldown and delay; several matches in one finalized utterance still activate it only once. Blank lines are ignored and case-insensitive duplicate entries are removed. Existing single-phrase triggers keep working with the same stored records.
+
+
+### Transcription model and segmentation
+
+Admin → Settings → Application settings offers `large-v3-turbo` and `large-v3`.
+The selection is stored in PostgreSQL. Only one model is loaded on the GPU.
+First use downloads to the persistent model volume; the status shows downloading,
+loading or restoring. Failed switches retain or reload the previous model.
+Recording pauses and buffered speech is discarded during switching, so stale
+speech cannot fire triggers. Discord sound playback remains independent.
+The full model may improve recognition but is slower; compare representative Dutch
+speech before choosing it. No accuracy improvement has been measured yet.
+
+Capture uses a separate WebRTC speech detector per speaker, 20 ms frames, a
+200 ms lead-in, 400 ms silence boundary and bounded five-second speech chunks.
+The transcription worker additionally applies Silero VAD. Punctuation in trigger
+phrases and recognized speech is ignored for matching.
+
+Disabling recording deletes all conversation sessions and transcript messages,
+hides the chat/history section and retains sound triggers. This is irreversible.
+Recording controls remain available for enabling a new conversation.
+
+Conversation shows only the live session, with no history selector or session pagination. Trigger search matches words, phrases and sound names immediately and case-insensitively; multiple search terms must all match.

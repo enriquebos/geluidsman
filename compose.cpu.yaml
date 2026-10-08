@@ -1,0 +1,6 @@
+services:
+  transcription:
+    gpus: !reset []
+    environment:
+      TRANSCRIPTION_DEVICE: cpu
+      TRANSCRIPTION_COMPUTE_TYPE: int8

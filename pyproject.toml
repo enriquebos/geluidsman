@@ -17,6 +17,7 @@ fastapi = ">=0.115,<1"
 uvicorn = ">=0.34,<1"
 pydantic-settings = ">=2.7,<3"
 numpy = ">=2.2,<3"
+webrtcvad-wheels = ">=2.0.14,<3"
 yt-dlp = { version = ">=2026.9.23", extras = ["default"], allow-prereleases = true }
 requests = ">=2.32,<3"
 cryptography = ">=46,<47"
@@ -26,6 +27,13 @@ psycopg = {version = ">=3.2,<4", extras = ["binary"]}
 tokenizers = {version = ">=0.21,<0.23", python = ">=3.11,<3.14"}
 huggingface-hub = {version = ">=0.34,<1", python = ">=3.11,<3.14"}
 faster-whisper = {version = ">=1.2,<2", python = ">=3.11,<3.14"}
+
+[tool.poetry.group.gpu]
+optional = true
+
+[tool.poetry.group.gpu.dependencies]
+nvidia-cublas-cu12 = {version = ">=12.8,<13", markers = "sys_platform == 'linux'"}
+nvidia-cudnn-cu12 = {version = ">=9.8,<10", markers = "sys_platform == 'linux'"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8,<10"
@@ -44,7 +52,7 @@ ignore = ["D", "CPY001", "COM812", "ISC001"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "PLR2004", "SLF001"]
 "app/config.py" = ["S104"]
-"app/transcription_worker.py" = ["S104"]
+"app/transcription_worker.py" = ["S104", "PLC0415"]
 "app/network.py" = ["N815"]
 "app/mixer.py" = ["SIM115"]
 "app/download_worker.py" = ["SLF001"]

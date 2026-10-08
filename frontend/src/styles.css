@@ -317,3 +317,31 @@ button[aria-disabled=true] { cursor:not-allowed; }
 
 .permissions-panel .settings-actions { align-items:center; }
 .permissions-panel .settings-actions [role=status] { flex:1; min-width:180px; text-align:center; }
+
+ .trigger-words { margin: 0; padding: 0; border: 0; min-width: 0; }
+.trigger-words legend { padding: 0; margin-bottom: 8px; font-weight: 600; }
+.trigger-words > p { font-size: 14px; margin-bottom: 12px; }
+.trigger-word-list { display: flex; flex-direction: column; gap: 10px; }
+.trigger-word-row { display: flex; align-items: flex-end; gap: 10px; }
+.trigger-word-row > label { flex: 1; min-width: 0; }
+.trigger-word-row input { width: 100%; }
+.trigger-word-row > button { flex-shrink: 0; width: 44px; height: 44px; margin-bottom: 1px; }
+.trigger-word-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+.conversation-triggers article strong { overflow-wrap: anywhere; }
+
+.conversation-page .trigger-dialog { width: min(1040px, calc(100vw - 40px)); }
+.trigger-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+.conversation-page .trigger-words { border: 0; border-radius: 0; padding: 0; display: block; }
+.trigger-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; min-width: 0; }
+.trigger-options > .search-select, .trigger-options > fieldset { grid-column: 1 / -1; }
+.trigger-form > .modal-actions { grid-column: 1 / -1; margin-top: 0; }
+@media (max-width: 760px) { .trigger-form { grid-template-columns: minmax(0, 1fr); gap: 20px; } }
+@media (max-width: 440px) { .trigger-options { grid-template-columns: minmax(0, 1fr); } }
+
+.select-popover { display:flex; flex-direction:column; overflow:hidden; z-index:110; }
+.select-popover [role=listbox] { min-height:0; flex:1; }
+.transcription-settings { margin:24px 0; padding-bottom:20px; border-bottom:1px solid var(--border); }
+.transcription-settings label { display:flex; flex-direction:column; gap:8px; }
+.transcription-settings p { margin-top:8px; }
+
+.trigger-search { display:flex; flex-direction:column; gap:8px; margin:20px 0; max-width:560px; }

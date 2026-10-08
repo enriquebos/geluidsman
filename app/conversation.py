@@ -6,6 +6,7 @@ import logging
 import queue
 import re
 import time
+import unicodedata
 from http import HTTPStatus
 from typing import TYPE_CHECKING
 
@@ -26,13 +27,21 @@ if TYPE_CHECKING:
     from app.events import Events
 
 MAX_QUEUE = 32
+MAX_BATCH = 4
+BATCH_WAIT_SECONDS = 0.04
 MAX_AGE = 30
 MESSAGE_DEDUP_LIMIT = 1024
 CLEANUP_INTERVAL = 3600
 
 
+def normalize_speech(value: str) -> str:
+    return " ".join(
+        "".join(" " if unicodedata.category(char).startswith("P") else char for char in value.casefold()).split()
+    )
+
+
 def matches(text: str, phrase: str, mode: str) -> bool:
-    text, phrase = text.casefold(), phrase.strip().casefold()
+    text, phrase = normalize_speech(text), normalize_speech(phrase)
     if not phrase:
         return False
     if mode == "contains":
@@ -66,11 +75,12 @@ class Conversation:
         self.last_cleanup = 0.0
         self.receiver_retry = 0.0
         self.last_status = ""
+        self.model_status: dict = {}
+        self.model_retry = 0.0
+        self.model_lock = asyncio.Lock()
 
     async def start(self) -> None:
-        await asyncio.to_thread(
-            self.db.execute, "UPDATE conversations SET ended_at=? WHERE ended_at IS NULL", (time.time(),)
-        )
+        await asyncio.to_thread(self.db.execute, "DELETE FROM conversations")
         self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25))
         self.tasks = [asyncio.create_task(self.monitor()), asyncio.create_task(self.process())]
 
@@ -120,10 +130,48 @@ class Conversation:
         while not self.work.empty():
             self.work.get_nowait()
         if session:
-            await asyncio.to_thread(
-                self.db.execute, "UPDATE conversations SET ended_at=? WHERE id=?", (time.time(), session["id"])
-            )
+            await asyncio.to_thread(self.db.execute, "DELETE FROM conversations WHERE id=?", (session["id"],))
             self.events.publish("conversation")
+
+    async def select_model(self, name: str) -> dict:
+        async with self.model_lock:
+            async with self.http.put(self.settings.transcription_url + "/model", json={"model": name}) as response:
+                response.raise_for_status()
+                status = await response.json()
+            await asyncio.to_thread(self.db.set_setting, "transcription_model", name)
+            self.model_status = status
+            if status.get("target"):
+                await self.close_session()
+            self.model_retry = time.monotonic() + 60
+            return status
+
+    async def synchronize_model(self) -> dict:
+        async with self.model_lock:
+            return await self.check_model()
+
+    async def check_model(self) -> dict:
+        desired = await asyncio.to_thread(self.db.setting, "transcription_model", "large-v3-turbo")
+        if self.http is None:
+            return {"model": desired, "phase": "unavailable", "ready": False}
+        try:
+            async with self.http.get(self.settings.transcription_url + "/health") as response:
+                response.raise_for_status()
+                status = await response.json()
+            if status.get("error") and status.get("ready") and status.get("model") != desired:
+                await asyncio.to_thread(self.db.set_setting, "transcription_model", status["model"])
+                desired = status["model"]
+            if status.get("model") != desired and status.get("ready") and time.monotonic() >= self.model_retry:
+                await self.close_session()
+                async with self.http.put(
+                    self.settings.transcription_url + "/model", json={"model": desired}
+                ) as response:
+                    response.raise_for_status()
+                    status = await response.json()
+                self.model_retry = time.monotonic() + 60
+            self.model_status = status
+        except (aiohttp.ClientError, TimeoutError, ValueError):
+            self.model_status = {"model": desired, "phase": "unavailable", "ready": False}
+        return {"selected": desired, **self.model_status}
 
     async def worker_ready(self) -> bool:
         try:
@@ -163,7 +211,7 @@ class Conversation:
             self.update_participants(voice)
 
     async def open_session(self, voice: VoiceRecvClient) -> None:
-        if time.monotonic() < self.receiver_retry or not await self.worker_ready():
+        if time.monotonic() < self.receiver_retry or self.model_status.get("target") or not await self.worker_ready():
             return
         session = {
             "id": new_id(),
@@ -177,10 +225,11 @@ class Conversation:
             "INSERT INTO conversations(id,channel_id,channel_name,started_at) VALUES (?,?,?,?)",
             (session["id"], session["channel_id"], session["channel_name"], session["started_at"]),
         )
-        if not self.enabled or voice is not self.bot.voice or not voice.is_connected() or self.bot.state.deafened:
-            await asyncio.to_thread(
-                self.db.execute, "UPDATE conversations SET ended_at=? WHERE id=?", (time.time(), session["id"])
-            )
+        if not self.enabled:
+            await asyncio.to_thread(self.db.execute, "DELETE FROM conversations WHERE id=?", (session["id"],))
+            return
+        if voice is not self.bot.voice or not voice.is_connected() or self.bot.state.deafened:
+            await asyncio.to_thread(self.db.execute, "DELETE FROM conversations WHERE id=?", (session["id"],))
             return
         self.allowed = {str(member.id) for member in voice.channel.members if not member.bot}
         self.session, self.voice = session, voice
@@ -219,6 +268,8 @@ class Conversation:
         tick = 0
         while True:
             try:
+                if tick % 100 == 0 and self.bot.client.is_ready():
+                    await self.synchronize_model()
                 if tick % 50 == 0:
                     await self.synchronize()
                 if self.session:
@@ -250,15 +301,7 @@ class Conversation:
             self.enqueue(speech)
 
     async def cleanup(self) -> None:
-        days = await asyncio.to_thread(self.db.setting, "conversation_retention_days", default=30)
-        await asyncio.to_thread(
-            self.db.execute,
-            "DELETE FROM conversations WHERE ended_at IS NOT NULL AND ended_at<?",
-            (time.time() - days * 86400,),
-        )
-        await asyncio.to_thread(
-            self.db.execute, "DELETE FROM conversation_messages WHERE started_at<?", (time.time() - days * 86400,)
-        )
+        await asyncio.to_thread(self.db.execute, "DELETE FROM conversations WHERE ended_at IS NOT NULL")
         self.last_cleanup = time.monotonic()
 
     def current(self, session_id: str, speech: Speech, delay: float = 0) -> bool:
@@ -273,53 +316,93 @@ class Conversation:
             and time.time() - speech.ended_at <= MAX_AGE + delay
         )
 
+    async def next_batch(self) -> list[tuple[str, Speech]]:
+        first = await self.work.get()
+        batch = [first]
+        deadline = asyncio.get_running_loop().time() + BATCH_WAIT_SECONDS
+        while len(batch) < MAX_BATCH:
+            try:
+                remaining = max(0, deadline - asyncio.get_running_loop().time())
+                item = (
+                    self.work.get_nowait()
+                    if not self.work.empty()
+                    else await asyncio.wait_for(self.work.get(), remaining)
+                )
+            except (asyncio.QueueEmpty, TimeoutError):
+                break
+            batch.append(item)
+        current = []
+        for session_id, speech in batch:
+            if self.current(session_id, speech):
+                current.append((session_id, speech))
+            else:
+                self.dropped += 1
+        return current
+
     async def process(self) -> None:
         while True:
-            session_id, speech = await self.work.get()
-            if not self.current(session_id, speech):
-                self.dropped += 1
+            batch = await self.next_batch()
+            if not batch:
                 continue
             try:
+                params = [("language", self.language)]
+                if len(batch) > 1:
+                    params.extend(("lengths", str(len(speech.pcm))) for _, speech in batch)
                 async with self.http.post(
-                    self.settings.transcription_url + "/transcribe",
-                    data=speech.pcm,
-                    params={"language": self.language},
+                    self.settings.transcription_url + ("/transcribe/batch" if len(batch) > 1 else "/transcribe"),
+                    data=b"".join(speech.pcm for _, speech in batch),
+                    params=params,
                     headers={"Content-Type": "application/octet-stream"},
                 ) as response:
                     if response.status != HTTPStatus.OK:
                         self.error = "Local transcription failed or is still loading; speech was dropped."
-                        self.dropped += 1
+                        self.dropped += len(batch)
                         continue
-                    result = await response.json()
-                if not self.current(session_id, speech):
-                    self.dropped += 1
-                    continue
-                text = str(result.get("text", "")).strip()[:4000]
-                if not text or result.get("language") not in {"nl", "en"}:
-                    continue
-                await asyncio.to_thread(
-                    self.db.execute,
-                    "INSERT INTO conversation_messages(id,session_id,speaker_id,speaker_name,avatar,started_at,"
-                    "ended_at,"
-                    "text,language) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (
-                        speech.id,
-                        session_id,
-                        speech.speaker_id,
-                        speech.name,
-                        speech.avatar,
-                        speech.started_at,
-                        speech.ended_at,
-                        text,
-                        result["language"],
-                    ),
-                )
-                self.error = None
-                self.events.publish("conversation", {"session_id": session_id})
-                await self.fire_triggers(session_id, speech, text)
+                    payload = await response.json()
+                results = payload.get("results") if len(batch) > 1 else [payload]
+                self.validate_results(results, len(batch))
+                for (session_id, speech), result in zip(batch, results, strict=True):
+                    await self.save_transcript(session_id, speech, result)
             except (aiohttp.ClientError, TimeoutError, ValueError, *DATABASE_ERRORS):
                 self.error = "Local transcription worker failed; speech was dropped."
-                self.dropped += 1
+                self.dropped += len(batch)
+
+    @staticmethod
+    def validate_results(results: object, count: int) -> None:
+        if (
+            not isinstance(results, list)
+            or len(results) != count
+            or not all(isinstance(result, dict) for result in results)
+        ):
+            message = "Invalid transcription batch response."
+            raise ValueError(message)
+
+    async def save_transcript(self, session_id: str, speech: Speech, result: dict) -> None:
+        if not self.current(session_id, speech):
+            self.dropped += 1
+            return
+        text = str(result.get("text", "")).strip()[:4000]
+        if not text or result.get("language") not in {"nl", "en"}:
+            return
+        await asyncio.to_thread(
+            self.db.execute,
+            "INSERT INTO conversation_messages(id,session_id,speaker_id,speaker_name,avatar,started_at,"
+            "ended_at,text,language) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                speech.id,
+                session_id,
+                speech.speaker_id,
+                speech.name,
+                speech.avatar,
+                speech.started_at,
+                speech.ended_at,
+                text,
+                result["language"],
+            ),
+        )
+        self.error = None
+        self.events.publish("conversation", {"session_id": session_id})
+        await self.fire_triggers(session_id, speech, text)
 
     async def fire_triggers(self, session_id: str, speech: Speech, text: str) -> None:
         if speech.id:
@@ -332,7 +415,9 @@ class Conversation:
             self.db.rows, "SELECT * FROM conversation_triggers WHERE enabled=1 ORDER BY created_at,id"
         )
         for trigger in triggers:
-            if not self.current(session_id, speech) or not matches(text, trigger["phrase"], trigger["mode"]):
+            if not self.current(session_id, speech) or not any(
+                matches(text, phrase, trigger["mode"]) for phrase in trigger["phrase"].splitlines()
+            ):
                 continue
             if trigger["target"] == "self" and speech.speaker_id != trigger["owner_id"]:
                 continue

@@ -17,7 +17,8 @@ from app.conversation_audio import MAX_CHUNK_SECONDS, SAMPLE_RATE, SILENCE_SECON
 from app.db import Database
 from app.events import Events
 from tests.test_auth import client as auth_fixture
-from tests.test_auth import headers, login
+from tests.test_auth import headers
+from tests.test_auth import login as auth_login
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -29,6 +30,14 @@ if TYPE_CHECKING:
 @pytest.fixture
 def client(tmp_path: Path) -> Iterator[TestClient]:
     yield from auth_fixture.__wrapped__(tmp_path)
+
+
+def login(client: TestClient) -> dict:
+    auth_login(client)
+    client.app.state.db.execute(
+        "UPDATE users SET permission_overrides=? WHERE id='100'", ('{"view_conversations":true}',)
+    )
+    return client.get("/api/auth/me").json()
 
 
 def seed(db: Database) -> None:
@@ -65,7 +74,10 @@ def test_matching(text: str, phrase: str, mode: str, *, expected: bool) -> None:
     assert matches(text, phrase, mode) is expected
 
 
-def test_segmentation_and_speaker_separation() -> None:
+def test_segmentation_and_speaker_separation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        Segmenter, "is_speech", lambda _self, _speaker, audio: np.mean(np.frombuffer(audio, dtype=np.int16)) > 200
+    )
     segmenter = Segmenter()
     audio = np.full(1920, 1000, dtype=np.int16).tobytes()
     silent = bytes(3840)
@@ -100,7 +112,10 @@ def test_audio_resampling_filters_aliases_and_preserves_packet_boundaries() -> N
     assert np.sqrt(np.mean(filtered[20:] ** 2)) < np.sqrt(np.mean(whole[20:] ** 2)) * 0.05
 
 
-def test_audio_preserves_bounded_quiet_lead_in() -> None:
+def test_audio_preserves_bounded_quiet_lead_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        Segmenter, "is_speech", lambda _self, _speaker, audio: np.mean(np.frombuffer(audio, dtype=np.int16)) > 200
+    )
     segmenter = Segmenter()
     quiet = np.full(1920, 100, dtype=np.int16).tobytes()
     loud = np.full(1920, 1000, dtype=np.int16).tobytes()
@@ -165,7 +180,7 @@ def test_trigger_api_persistence_validation_and_ownership(client: TestClient) ->
         ("200", "other", "Other", 0, 0),
     )
     client.app.state.db.execute("UPDATE conversation_triggers SET owner_id='200' WHERE id=?", (trigger_id,))
-    assert not client.get("/api/conversation/triggers").json()["items"]
+    assert client.get("/api/conversation/triggers").json()["items"][0]["owner_id"] == "200"
     assert (
         client.delete(
             f"/api/conversation/triggers/{trigger_id}", headers=headers(client.get("/api/auth/me").json())
@@ -176,7 +191,7 @@ def test_trigger_api_persistence_validation_and_ownership(client: TestClient) ->
         client.put(
             f"/api/conversation/triggers/{trigger_id}", json=body, headers=headers(client.get("/api/auth/me").json())
         ).status_code
-        == 403
+        == 200
     )
     client.app.state.auth.admin_ids = {"100"}
     assert len(client.get("/api/conversation/triggers").json()["items"]) == 1
@@ -192,11 +207,10 @@ def test_trigger_api_persistence_validation_and_ownership(client: TestClient) ->
 @pytest.mark.parametrize(
     ("permission", "method", "path", "body"),
     [
-        ("view_conversations", "GET", "/api/conversations", None),
+        ("view_conversations", "GET", "/api/conversations/unknown/messages", None),
         ("view_conversations", "GET", "/api/conversations/status", None),
         ("view_conversations", "GET", "/api/conversations/session/messages", None),
         ("control_recording", "PUT", "/api/conversations/recording", {"enabled": False}),
-        ("manage_triggers", "GET", "/api/conversation/triggers", None),
         ("manage_triggers", "POST", "/api/conversation/triggers", {"clip_id": "sound", "phrase": "hello"}),
         ("manage_triggers", "DELETE", "/api/conversation/triggers/id", None),
     ],
@@ -206,7 +220,8 @@ def test_conversation_permission_denials(
 ) -> None:
     login(client)
     client.app.state.db.execute(
-        "UPDATE users SET permission_overrides=? WHERE id='100'", (json.dumps({permission: False}),)
+        "UPDATE users SET permission_overrides=? WHERE id='100'",
+        (json.dumps({"view_conversations": True, permission: False}),),
     )
     assert (
         client.request(method, path, json=body, headers=headers(client.get("/api/auth/me").json())).status_code == 403
@@ -214,7 +229,7 @@ def test_conversation_permission_denials(
     assert client.get("/api/auth/me").status_code == 200
 
 
-def test_history_pagination_and_cursor_ties(client: TestClient) -> None:
+def test_live_message_pagination_and_removed_history(client: TestClient) -> None:
     login(client)
     db = client.app.state.db
     for index in range(51):
@@ -230,8 +245,9 @@ def test_history_pagination_and_cursor_ties(client: TestClient) -> None:
             ),
             (f"message{index:03}", "session50", "100", "Me", 1, 2, "Hallo", "nl"),
         )
-    assert len(client.get("/api/conversations").json()["items"]) == 50
-    assert client.get("/api/conversations?page=2").json()["pages"] == 2
+    assert client.get("/api/conversations").status_code == 404
+    assert client.get("/api/conversations/session50/messages").status_code == 404
+    client.app.state.conversation.session = {"id": "session50"}
     data = client.get("/api/conversations/session50/messages").json()
     assert len(data["items"]) == 100
     assert data["has_older"]
@@ -240,23 +256,7 @@ def test_history_pagination_and_cursor_ties(client: TestClient) -> None:
     assert not older["has_older"]
     assert client.get("/api/conversations/session50/messages?before=missing").status_code == 404
     assert client.get("/api/conversations/missing/messages").status_code == 404
-    assert (
-        client.delete("/api/conversations/session50", headers=headers(client.get("/api/auth/me").json())).status_code
-        == 403
-    )
-    client.app.state.auth.admin_ids = {"100"}
-    assert (
-        client.delete("/api/conversations/session50", headers=headers(client.get("/api/auth/me").json())).status_code
-        == 200
-    )
-    assert not db.rows("SELECT * FROM conversation_messages")
-    assert (
-        client.put(
-            "/api/admin/conversations/settings", json={"days": 10}, headers=headers(client.get("/api/auth/me").json())
-        ).status_code
-        == 200
-    )
-    assert client.get("/api/admin/conversations/settings").json()["days"] == 10
+    assert client.get("/api/admin/conversations/settings").status_code == 404
     assert (
         client.put(
             "/api/conversations/recording", json={"enabled": False}, headers=headers(client.get("/api/auth/me").json())
@@ -285,7 +285,7 @@ def manager(db: Database) -> Conversation:
     return result
 
 
-def test_session_without_chat_notice_deafen_disconnect_and_retention(tmp_path: Path) -> None:
+def test_session_without_chat_notice_deafen_disconnect_and_cleanup(tmp_path: Path) -> None:
     async def scenario() -> None:
         db = Database(tmp_path / "test.sqlite3")
         value = manager(db)
@@ -302,7 +302,7 @@ def test_session_without_chat_notice_deafen_disconnect_and_retention(tmp_path: P
         assert value.session is None
         assert not value.allowed
         assert value.work.empty()
-        assert db.one("SELECT ended_at FROM conversations WHERE id=?", (session,))["ended_at"]
+        assert not db.one("SELECT id FROM conversations WHERE id=?", (session,))
         value.bot.state.deafened = False
         await value.synchronize()
         assert value.session["id"] != session
@@ -392,7 +392,7 @@ def test_trigger_speaker_targets(tmp_path: Path, target: str, speaker: str, *, e
 
 
 @pytest.mark.parametrize("language", ["nl", "en"])
-def test_transcript_pipeline_persistence_and_safe_notifications(tmp_path: Path, language: str) -> None:
+def test_transcript_pipeline_live_storage_and_safe_notifications(tmp_path: Path, language: str) -> None:
     async def scenario() -> None:
         db = Database(tmp_path / "pipeline.sqlite3")
         value = manager(db)
@@ -420,7 +420,7 @@ def test_transcript_pipeline_persistence_and_safe_notifications(tmp_path: Path, 
         await value.close_session()
         db.close()
         restored = Database(tmp_path / "pipeline.sqlite3")
-        assert restored.rows("SELECT * FROM conversation_messages")[0]["text"] == "Private spoken words"
+        assert not restored.rows("SELECT * FROM conversation_messages")
         restored.close()
 
     asyncio.run(scenario())
@@ -538,13 +538,17 @@ def test_conversation_language_default_permission_validation_and_persistence(cli
     assert client.app.state.db.setting("conversation_language") == "en"
     assert client.get("/api/conversations/status").json()["language"] == "en"
     client.app.state.db.execute(
-        "UPDATE users SET permission_overrides=? WHERE id='100'", ('{"control_recording":false}',)
+        "UPDATE users SET permission_overrides=? WHERE id='100'",
+        ('{"view_conversations":true,"control_recording":false}',),
     )
     assert client.put(endpoint, json={"language": "nl"}, headers=headers(user)).status_code == 403
     assert client.app.state.db.setting("conversation_language") == "en"
 
 
-def test_speech_finalizes_after_short_silence_without_cutting_brief_pauses() -> None:
+def test_speech_finalizes_after_short_silence_without_cutting_brief_pauses(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        Segmenter, "is_speech", lambda _self, _speaker, audio: np.mean(np.frombuffer(audio, dtype=np.int16)) > 200
+    )
     segmenter = Segmenter()
     audio = np.full(1920, 1000, dtype=np.int16).tobytes()
     segmenter.feed(("1", "Speaker", None), audio, 1)
@@ -601,3 +605,237 @@ def test_stop_trigger_input_and_delay_validation(client: TestClient) -> None:
         assert client.post(
             "/api/conversation/triggers", json={**body, **changes}, headers=headers(user)
         ).status_code in {404, 422}
+
+
+@pytest.mark.parametrize("disconnected", [False, True])
+def test_batch_speakers_keep_identity_and_discard_disconnected_results(tmp_path: Path, *, disconnected: bool) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "batch.sqlite3")
+        value = manager(db)
+        await value.synchronize()
+        value.fire_triggers = AsyncMock()
+        response = Mock(status=200)
+
+        async def result() -> dict:
+            if disconnected:
+                await value.close_session()
+            return {
+                "results": [{"text": "First speaker", "language": "nl"}, {"text": "Second speaker", "language": "en"}]
+            }
+
+        response.json = result
+        context = AsyncMock()
+        context.__aenter__.return_value = response
+        value.http = Mock()
+        value.http.post.return_value = context
+        for speaker in ["100", "200"]:
+            value.enqueue(Speech(speaker, speaker, None, time.time(), time.time(), speaker.encode()))
+        task = asyncio.create_task(value.process())
+        for _ in range(100):
+            if value.fire_triggers.await_count == 2 or value.dropped == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert value.http.post.call_count == 1
+        assert value.http.post.call_args.args[0].endswith("/transcribe/batch")
+        assert value.http.post.call_args.kwargs["data"] == b"100200"
+        messages = db.rows("SELECT * FROM conversation_messages ORDER BY speaker_id")
+        if disconnected:
+            assert not messages
+            assert value.fire_triggers.await_count == 0
+            assert value.dropped == 2
+        else:
+            assert [(item["speaker_id"], item["text"]) for item in messages] == [
+                ("100", "First speaker"),
+                ("200", "Second speaker"),
+            ]
+            assert value.fire_triggers.await_count == 2
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await value.close_session()
+        db.close()
+
+    asyncio.run(scenario())
+
+
+def test_batch_bounds_and_stale_work(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "bounded.sqlite3")
+        value = manager(db)
+        await value.synchronize()
+        for index in range(6):
+            value.enqueue(Speech("100", str(index), None, time.time(), time.time() - (60 if index == 0 else 0), b"00"))
+        batch = await value.next_batch()
+        assert len(batch) == 3
+        assert value.work.qsize() == 2
+        assert value.dropped == 1
+        before = time.monotonic()
+        assert len(await value.next_batch()) == 2
+        assert time.monotonic() - before < 0.2
+        await value.close_session()
+        db.close()
+
+    asyncio.run(scenario())
+
+
+def test_multiple_trigger_terms_persist_and_validate(client: TestClient) -> None:
+    login(client)
+    seed(client.app.state.db)
+    csrf = headers(client.get("/api/auth/me").json())
+    body = {"clip_id": "sound", "phrase": " Hallo \nhoi\nHALLO\nhey   iedereen\n"}
+    response = client.post("/api/conversation/triggers", json=body, headers=csrf)
+    assert response.status_code == 201
+    trigger_id = response.json()["id"]
+    trigger = client.get("/api/conversation/triggers").json()["items"][0]
+    assert trigger["phrase"] == "Hallo\nhoi\nhey iedereen"
+    assert trigger["phrases"] == ["Hallo", "hoi", "hey iedereen"]
+    assert (
+        client.put(
+            f"/api/conversation/triggers/{trigger_id}", json={**body, "phrase": "dag\ntot ziens"}, headers=csrf
+        ).status_code
+        == 200
+    )
+    trigger = client.get("/api/conversation/triggers").json()["items"][0]
+    assert trigger["phrases"] == ["dag", "tot ziens"]
+    for phrase in ["\n \n", "x" * 256, "\n".join(str(index) for index in range(21))]:
+        assert (
+            client.post("/api/conversation/triggers", json={**body, "phrase": phrase}, headers=csrf).status_code == 422
+        )
+    maximum = "\n".join(str(index).ljust(255, "x") for index in range(20))
+    assert client.post("/api/conversation/triggers", json={**body, "phrase": maximum}, headers=csrf).status_code == 201
+
+
+@pytest.mark.parametrize(
+    ("mode", "text", "expected"),
+    [
+        ("word", "Hoi allemaal", 1),
+        ("word", "hey iedereen en hallo hoi", 1),
+        ("word", "ahoi", 0),
+        ("contains", "ahoi", 1),
+        ("contains", "hey iedereen en hoi hoi", 1),
+        ("word", "hey en iedereen", 0),
+    ],
+)
+def test_multiple_terms_activate_once_per_utterance(tmp_path: Path, mode: str, text: str, expected: int) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "words.sqlite3")
+        seed(db)
+        value = manager(db)
+        await value.synchronize()
+        db.execute(
+            "INSERT INTO conversation_triggers(id,owner_id,clip_id,phrase,mode,target,speakers,cooldown,enabled,"
+            "created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("trigger", "100", "sound", "hallo\nhoi\nhey iedereen", mode, "everyone", "[]", 0, 1, 0),
+        )
+        speech = Speech("100", "Owner", None, time.time(), time.time(), b"audio", "utterance")
+        await value.fire_triggers(value.session["id"], speech, text)
+        await value.fire_triggers(value.session["id"], speech, text)
+        assert value.bot.state.play.call_count == expected
+        await value.close_session()
+        db.close()
+
+    asyncio.run(scenario())
+
+
+def test_global_triggers_are_visible_without_management_permission(client: TestClient) -> None:
+    assert client.get("/api/conversation/triggers").status_code == 401
+    login(client)
+    seed(client.app.state.db)
+    user = client.get("/api/auth/me").json()
+    response = client.post(
+        "/api/conversation/triggers", json={"clip_id": "sound", "phrase": "Shared word"}, headers=headers(user)
+    )
+    assert response.status_code == 201
+    client.app.state.db.execute(
+        "UPDATE users SET permission_overrides=? WHERE id='100'",
+        ('{"view_conversations":true,"manage_triggers":false}',),
+    )
+    response = client.get("/api/conversation/triggers")
+    assert response.status_code == 200
+    assert response.json()["items"][0]["phrase"] == "Shared word"
+    assert (
+        client.put(
+            f"/api/conversation/triggers/{response.json()['items'][0]['id']}",
+            json={"clip_id": "sound", "phrase": "Changed"},
+            headers=headers(user),
+        ).status_code
+        == 403
+    )
+
+
+def test_conversation_access_is_default_denied_and_grants_apply_immediately(client: TestClient) -> None:
+    user = auth_login(client)
+    assert not user["permissions"]["view_conversations"]
+    for method, endpoint, body in [
+        ("GET", "/api/conversations/unknown/messages", None),
+        ("GET", "/api/conversations/status", None),
+        ("GET", "/api/conversation/triggers", None),
+        ("PUT", "/api/conversations/recording", {"enabled": False}),
+        ("PUT", "/api/conversations/language", {"language": "nl"}),
+        ("POST", "/api/conversation/triggers", {"action": "stop_all", "phrase": "hello"}),
+        ("PUT", "/api/conversation/triggers/unknown", {"action": "stop_all", "phrase": "hello"}),
+        ("DELETE", "/api/conversation/triggers/unknown", None),
+    ]:
+        assert client.request(method, endpoint, json=body, headers=headers(user)).status_code == 403
+    client.app.state.db.execute(
+        "UPDATE users SET permission_overrides=? WHERE id='100'", ('{"view_conversations":true}',)
+    )
+    assert client.get("/api/conversations/status").status_code == 200
+    assert client.get("/api/conversation/triggers").status_code == 200
+    client.app.state.db.execute("UPDATE users SET permission_overrides='{}' WHERE id='100'")
+    assert client.get("/api/conversation/triggers").status_code == 403
+    assert client.get("/api/auth/me").status_code == 200
+
+
+@pytest.mark.parametrize("mode", ["word", "contains"])
+def test_punctuation_is_ignored_in_trigger_phrases(mode: str) -> None:
+    assert matches("Hallo, wereld! Doe. maar...", "hallo wereld", mode)
+    assert matches("Hallo wereld", "hallo, wereld!", mode)
+    assert not matches("Hallo wereld", "!!!", mode)
+    assert not matches("Stoplicht", "stop", "word")
+
+
+def test_vad_rejects_silence_and_bounds_partial_frames() -> None:
+    value = Segmenter()
+    for _ in range(100):
+        assert not value.is_speech("speaker", bytes(100))
+        assert len(value.vad_pending["speaker"]) < 640
+    value.is_speech("other", bytes(640))
+    assert value.detectors["speaker"] is not value.detectors["other"]
+
+
+def test_disabling_recording_removes_history_and_preserves_triggers(client: TestClient) -> None:
+    user = login(client)
+    db = client.app.state.db
+    db.execute("INSERT INTO conversations(id,channel_id,channel_name,started_at) VALUES ('history','123','Voice',1)")
+    db.execute(
+        "INSERT INTO conversation_messages(id,session_id,speaker_id,speaker_name,started_at,ended_at,text,language) "
+        "VALUES ('text','history','100','Owner',1,2,'Hello','nl')"
+    )
+    response = client.put("/api/conversations/recording", json={"enabled": False}, headers=headers(user))
+    assert response.status_code == 200
+    assert not db.rows("SELECT * FROM conversations")
+    assert not db.rows("SELECT * FROM conversation_messages")
+    assert not client.app.state.conversation.enabled
+
+
+def test_admin_model_switch_validation_and_persistence(client: TestClient) -> None:
+    user = login(client)
+    value = client.app.state.conversation
+    value.synchronize_model = AsyncMock(return_value={"ready": True, "model": "large-v3-turbo", "target": None})
+
+    async def selected(name: str) -> dict:
+        client.app.state.db.set_setting("transcription_model", name)
+        return {"ready": False, "model": "large-v3-turbo", "target": name}
+
+    value.select_model = selected
+    endpoint = "/api/admin/transcription"
+    assert client.get(endpoint).status_code == 403
+    assert client.put(endpoint, json={"model": "large-v3"}, headers=headers(user)).status_code == 403
+    client.app.state.auth.admin_ids = {"100"}
+    user = client.get("/api/auth/me").json()
+    assert client.put(endpoint, json={"model": "invalid"}, headers=headers(user)).status_code == 422
+    assert client.put(endpoint, json={"model": "large-v3"}, headers=headers(user)).status_code == 200
+    assert client.app.state.db.setting("transcription_model") == "large-v3"
+    value.synchronize_model.return_value = {"ready": False, "target": "large-v3"}
+    assert client.put(endpoint, json={"model": "large-v3-turbo"}, headers=headers(user)).status_code == 409
+    assert client.app.state.db.setting("transcription_model") == "large-v3"

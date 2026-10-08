@@ -39,7 +39,11 @@ services:
     restart: unless-stopped
     init: true
     cpus: 4
-    mem_limit: 4g
+    mem_limit: 6g
+    gpus: all
+    environment:
+      TRANSCRIPTION_DEVICE: cuda
+      TRANSCRIPTION_COMPUTE_TYPE: float16
     volumes:
       - transcription_models:/models
     healthcheck:

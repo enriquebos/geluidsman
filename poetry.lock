@@ -1936,6 +1936,54 @@ files = [
 markers = {main = "python_version >= \"3.13\"", worker = "python_version == \"3.13\""}
 
 [[package]]
+name = "nvidia-cublas-cu12"
+version = "12.9.2.10"
+description = "CUBLAS native runtime libraries"
+optional = false
+python-versions = ">=3"
+groups = ["gpu"]
+markers = "sys_platform == \"linux\""
+files = [
+    {file = "nvidia_cublas_cu12-12.9.2.10-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:5572131a59c3eebeeb1c4c8144f772d49372c20124916e072a0e3fc30df421d5"},
+    {file = "nvidia_cublas_cu12-12.9.2.10-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:e4f53a8ca8c5d6e8c492d0d0a3d565ecb59a751b19cfdaa4f6da0ab2104c1702"},
+    {file = "nvidia_cublas_cu12-12.9.2.10-py3-none-win_amd64.whl", hash = "sha256:623f43027d40d44ceadf0043f002bd25cf353e8f13ce90b9a87057019f560661"},
+]
+
+[package.dependencies]
+nvidia-cuda-nvrtc-cu12 = "*"
+
+[[package]]
+name = "nvidia-cuda-nvrtc-cu12"
+version = "12.9.86"
+description = "NVRTC native runtime libraries"
+optional = false
+python-versions = ">=3"
+groups = ["gpu"]
+markers = "sys_platform == \"linux\""
+files = [
+    {file = "nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl", hash = "sha256:210cf05005a447e29214e9ce50851e83fc5f4358df8b453155d5e1918094dcb4"},
+    {file = "nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:096d4de6bda726415dfaf3198d4f5c522b8e70139c97feef5cd2ca6d4cd9cead"},
+    {file = "nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-win_amd64.whl", hash = "sha256:72972ebdcf504d69462d3bcd67e7b81edd25d0fb85a2c46d3ea3517666636349"},
+]
+
+[[package]]
+name = "nvidia-cudnn-cu12"
+version = "9.27.0.42"
+description = "cuDNN runtime libraries"
+optional = false
+python-versions = ">=3"
+groups = ["gpu"]
+markers = "sys_platform == \"linux\""
+files = [
+    {file = "nvidia_cudnn_cu12-9.27.0.42-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:5bc22243563107ea06aa60f9116ad800063d5f4617cc75bc6670d5db78d9f336"},
+    {file = "nvidia_cudnn_cu12-9.27.0.42-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:0a4aa3a7d2264256506c6857fc41fc0c499982f78d70195b1cfcc9055c1957cd"},
+    {file = "nvidia_cudnn_cu12-9.27.0.42-py3-none-win_amd64.whl", hash = "sha256:06e9b0026f3bad97d2b58666330fabec04fe1672f776661ecb0ce0029c27f142"},
+]
+
+[package.dependencies]
+nvidia-cublas-cu12 = "*"
+
+[[package]]
 name = "onnxruntime"
 version = "1.30.0"
 description = "ONNX Runtime is a runtime accelerator for Machine Learning models"
@@ -2916,6 +2964,86 @@ h11 = ">=0.8"
 standard = ["httptools (>=0.8.0)", "python-dotenv (>=0.13)", "pyyaml (>=5.1)", "uvloop (>=0.15.1) ; sys_platform != \"win32\" and sys_platform != \"cygwin\" and platform_python_implementation != \"PyPy\"", "watchfiles (>=0.20)", "websockets (>=13.0)"]
 
 [[package]]
+name = "webrtcvad-wheels"
+version = "2.0.14.post1"
+description = "Python interface to the Google WebRTC Voice Activity Detector (VAD) [released with binary wheels!]"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "webrtcvad_wheels-2.0.14.post1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:3817145d286612dc155e368edd2f13acab76266677d355063c2b268f92e22ebb"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:0719c8c11ebbaf295e8dd025bcad81b5fc3b186e04e3203fe2fa63a46eed8cf5"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp310-cp310-manylinux1_i686.manylinux2014_i686.manylinux_2_17_i686.manylinux_2_5_i686.whl", hash = "sha256:8dfa72612456a8034ae312b45fbde03c92040ef6bc314d4ae6e446083e73d7f5"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:aafa64446ab0abfc1aa90abeb3e37a0de2e69ed71ea198da40e50f2261cb78ba"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp310-cp310-manylinux2014_ppc64le.manylinux_2_17_ppc64le.whl", hash = "sha256:c54151f7bdc16c3c75c59596427571154bd16b9d8a42981885cdabc2ff7cee1e"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:623353ac9631d0f533dccfb22580a204695a797e841bd243f295df1f7ec14623"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp310-cp310-musllinux_1_2_aarch64.whl", hash = "sha256:f9b2d8656bb814d0f9947d8b7bbfcac2b39e77164d36fe72b34d2a992bb6526c"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp310-cp310-musllinux_1_2_i686.whl", hash = "sha256:fb89f7e625724ea0cd313d7438e48bf37cf319fb6f73f2e51f692f4e4c73edf9"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp310-cp310-musllinux_1_2_ppc64le.whl", hash = "sha256:330a6c0b82751c3347a0af64a9ae11df36dbd82a5608743ba14e7725f2f13849"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:a7459f26830167e2571d45a8930c852115f10a21e4c1f352b570f5abd532e5d4"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp310-cp310-win32.whl", hash = "sha256:77a4629acfcfc73a7e4c503f7c608bfcde5c2e71ea056b4685bef395b72f01ea"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp310-cp310-win_amd64.whl", hash = "sha256:a1349f6ce3629863a88092419eb2b08cc45b9244ae79f55ced8afe352ef4314e"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:56fa558cb7b360aa7e9cb91d684dfa6b64863bd00be3f3ae8f9267e3d5a26c71"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:5ea447a9b1befe67d4199e162f298c66b520170a27afee643a71e197e134212e"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp311-cp311-manylinux1_i686.manylinux2014_i686.manylinux_2_17_i686.manylinux_2_5_i686.whl", hash = "sha256:2ac428b2c7d26106c1eda7e080a8ca652987c6c73771a9cd4e511e6348719d29"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:67a412dcc0a9dbb573197560c3b79d855c7b550773968f7182547a3b079ddf1f"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp311-cp311-manylinux2014_ppc64le.manylinux_2_17_ppc64le.whl", hash = "sha256:73edd68a9328db6452925185afa9d228e622ec8a95bbee9e9a2ec63e45fc1f89"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:f20b5a3c9c206ab8572120a61cd5d175a65e059bd2e4cd2de28db4c17c5269dd"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:a899cb90ba23784faf007cae783639991d1146bcce6255f0a6dc10c863fd9255"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp311-cp311-musllinux_1_2_i686.whl", hash = "sha256:a7886aa5f34228f2cbc9462b76b68893672f45955cf0873533c2b7b7d17a6249"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp311-cp311-musllinux_1_2_ppc64le.whl", hash = "sha256:b36ccdae75f6a4e0a13a86d5f2ca9c83c2fd21c773fc58defc3d217b422c629e"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:5c2e089690ad2ef282fb5d19ecae88fc9bb739eaa0bd0389fcb971467234cb05"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp311-cp311-win32.whl", hash = "sha256:1a5da237a1d69adbd75cc0b7ca7ad8246bd1bfa1916c1f35757068b94a494725"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp311-cp311-win_amd64.whl", hash = "sha256:36dd717f96cdd071026c094d6b165b30da1bd974b52cef1fbfba306034c60606"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:d52241ea622917ed4f6ce7074ccc36d31003f287382b87a38fb6641239055772"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:132ffb4ca996d321f0226d0e01aec229277306f3b86b1dada549b0b063601fce"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp312-cp312-manylinux1_i686.manylinux2014_i686.manylinux_2_17_i686.manylinux_2_5_i686.whl", hash = "sha256:a74f5fcedeb24db05f2793ea7d0cfd8c5fcb4368cab0d07e52b7db205910d8fa"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:394af5aea41253b34e858f0f977a62f1c9fafeff7cc9adf71422e8431e68e80b"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp312-cp312-manylinux2014_ppc64le.manylinux_2_17_ppc64le.whl", hash = "sha256:82455fa469dbe69e560c62177f0092ce62be01ad2f3500eed41c55b0a2f4351e"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:0cdacbdba4551e55481b8bddd44f2faf5d5021eba3662c56a21b9342945f8c92"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp312-cp312-musllinux_1_2_aarch64.whl", hash = "sha256:1e0e5db8460cbc3f669ddbc3c5d76aa2a7c9451dcc4026e2941482853a0fad07"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:3e155163db19fbcef4cb3d04bcdc868c43d36e9ed0d37a0c18ae9cabd86ddf47"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp312-cp312-musllinux_1_2_ppc64le.whl", hash = "sha256:dcffe93ba576d1ddaca1237893d278d7606b1d7e78556c0c24f1e500292d6bee"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:123347d6b0ec676594b5c809c0916ff9a5824a77da88bba5a8801ac98bd3e45e"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp312-cp312-win32.whl", hash = "sha256:a286294cebd66bc17e0657b793f90c8ac6954f7796aed6590fe4ab0a9e0a601b"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp312-cp312-win_amd64.whl", hash = "sha256:a085ee7fa3f96ac7985ef0c1e3194e4c9c544cc9a0579b6dbd12c84d610271cc"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:c06f32bdeb40685fb11651ee2b3196d6ec7cdce308c1a0f4fc3733672519669f"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:082e09967ae59ee8da87ddb10353cd99da97eb113462c6059e55a75c0b57dff1"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp313-cp313-manylinux1_i686.manylinux2014_i686.manylinux_2_17_i686.manylinux_2_5_i686.whl", hash = "sha256:4ecab1d8ab5338001e1be0413a00d005b13b9807f3201a0876934bdb8c9201ae"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9658d73f8d9aca3070244a359c36ac1c92b87551b4bc1525fbca8dd97fcef459"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp313-cp313-manylinux2014_ppc64le.manylinux_2_17_ppc64le.whl", hash = "sha256:2523c92a476a8f837e4e1a909be793f14b9763390f68c207fefe72a1e04238a7"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:70176f1a20edb64d55616161361b0f71105a16041b1e205685c8af3f7c8dc727"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:1a1870fd4ecd1b27870c900632c7abed9fa6903b8ece70923f20d4ed5105c6b5"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp313-cp313-musllinux_1_2_i686.whl", hash = "sha256:f7bb8cb08ca46b17c43567498862e5209a30e7bd7998203342cedb00377ccf39"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp313-cp313-musllinux_1_2_ppc64le.whl", hash = "sha256:b9e328d39dc0da58917e0f32140b4189621264c97aac58ef01e326aedde258d0"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:34080e3ed336e2d891b850bd800b9ff1a9b9c67d5ae8b5c353a70aae064dd226"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp313-cp313-win32.whl", hash = "sha256:c97a58b76e8d19f6bfc642770f0cc29578431023b614a4feb56e2f184ab98db7"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp313-cp313-win_amd64.whl", hash = "sha256:ffbe00c93e2b03ee511c7fad29c4d92ec17cd33bc181c55636334079252b633f"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:951732c032fcb4953bd2f1216a9c97392d28299b487ac4ca5b39c0d3c94546f6"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:e4074b41d4d8113ad4cef0a372c321468ed5469430ddb2190aa6aa94bf5aecc5"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp314-cp314-manylinux1_i686.manylinux2014_i686.manylinux_2_17_i686.manylinux_2_5_i686.whl", hash = "sha256:5dc4e8d8e0d09899b3047e97a86c23f62693d0f7a1686b815b84f1b0af583fea"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:597cfb86cd4fa70f1500a45bf305267cc769ee91823c313ef14e8313ca1b3a1a"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp314-cp314-manylinux2014_ppc64le.manylinux_2_17_ppc64le.whl", hash = "sha256:c68e65130a12579cf7ccc56ff62d4befcd6c6377f0102216094b0040435e7686"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:53230d2967e350133968c8b7231b2c3ea3707443ce10091fe00dbd097f229256"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:5762df66871d6fd7de64bc5bfe383f7e7b64168547a47957eec219718c661649"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp314-cp314-musllinux_1_2_i686.whl", hash = "sha256:e95bf20941aa757ca9546ce695a85bb4d241f51a8c0f85cac002061a95fb7f0f"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp314-cp314-musllinux_1_2_ppc64le.whl", hash = "sha256:e8c82057365e9c97a359a8367df885ffc892108c1e07d511438f02a0ed530846"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:5c331cadec3605451ceac7aff4004d8214e9d62a307b63d3e0b1254a260349a2"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp314-cp314-win32.whl", hash = "sha256:83db815981a2d21df1f4ab19956108073b29bd85735c6f0736f782e021235ebd"},
+    {file = "webrtcvad_wheels-2.0.14.post1-cp314-cp314-win_amd64.whl", hash = "sha256:81299c26ea7eacc9bef03320150a6a71437bdfca0fe7056637918fd93f0176f4"},
+    {file = "webrtcvad_wheels-2.0.14.post1-pp311-pypy311_pp73-macosx_10_15_x86_64.whl", hash = "sha256:13f023ccd15c3e7d2b583b275b8fc8997d55734ff80c2aa472c73934ca0a82c7"},
+    {file = "webrtcvad_wheels-2.0.14.post1-pp311-pypy311_pp73-macosx_11_0_arm64.whl", hash = "sha256:98ebd4c468a719c1c33895c8f626ce46f771cf8f2c969fc94312a923cb059ecf"},
+    {file = "webrtcvad_wheels-2.0.14.post1-pp311-pypy311_pp73-manylinux1_i686.manylinux2014_i686.manylinux_2_17_i686.manylinux_2_5_i686.whl", hash = "sha256:113e4993fd6a7b5d1e6be65332c6909a2e20ed0127cc09725ac470868d6bd454"},
+    {file = "webrtcvad_wheels-2.0.14.post1-pp311-pypy311_pp73-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:9c9b0623cdf7b2a00ab13518b933bf2fbd0b3288278ecaa2e2c07df448a3b308"},
+    {file = "webrtcvad_wheels-2.0.14.post1-pp311-pypy311_pp73-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:10d5ff44b589586514a754eff4e43fa31e725ce8ef07a1a5c0a62a3f9d7bd232"},
+    {file = "webrtcvad_wheels-2.0.14.post1-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:f4a11f75eff4437f71e4418884b20b36e4f5f5072b6c1c3d0d96626949e887ac"},
+    {file = "webrtcvad_wheels-2.0.14.post1.tar.gz", hash = "sha256:c740e93d24b5d0d7ecdd5548c43e37e2c88564826e869c861d5e3fa7f1cee7ff"},
+]
+
+[package.extras]
+dev = ["psutil", "unittest2"]
+
+[[package]]
 name = "websockets"
 version = "17.2"
 description = "An implementation of the WebSocket Protocol (RFC 6455 & 7692)"
@@ -3274,4 +3402,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.15"
-content-hash = "0fb382eeb7adc3c78fcf8cdd92ff80e4ba5c00977f74d71fe89852544b94c431"
+content-hash = "3021d6edaa641c33df2835cab61e9ab4820863f877277384f11735a8ab7efcfa"

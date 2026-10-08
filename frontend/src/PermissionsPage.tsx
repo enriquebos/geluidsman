@@ -23,9 +23,9 @@ const descriptions: Record<string, string> = {
   import_channels: 'Import videos from a supported YouTube channel.',
   manage_imports: 'Pause or dismiss import jobs. Retry and resume also require the relevant import permission.',
   delete_videos: 'Remove videos from the shared library.',
-  view_conversations: 'Read live transcripts and saved conversations.',
+  view_conversations: 'Access the Conversation page, transcripts and shared triggers. Off by default.',
   control_recording: 'Enable or disable automatic conversation recording.',
-  manage_triggers: 'Create and manage your own word-to-sound triggers.',
+  manage_triggers: 'Create, edit and toggle any sound trigger. Delete your own triggers.',
   view_audit: 'View activity, search the audit log and inspect event details.',
 }
 

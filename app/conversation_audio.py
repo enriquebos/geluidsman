@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
+import webrtcvad
 from discord.ext import voice_recv
 
 if TYPE_CHECKING:
@@ -16,7 +17,7 @@ MAX_CHUNK_SECONDS = 5
 SILENCE_SECONDS = 0.4
 MAX_SPEAKERS = 64
 SAMPLE_RATE = 16000
-VAD_THRESHOLD = 200
+VAD_FRAME_BYTES = 640
 RESAMPLE_FACTOR = 3
 FILTER_TAPS = 31
 PRE_ROLL_SECONDS = 0.2
@@ -50,6 +51,8 @@ class Segmenter:
         self.history: dict[str, np.ndarray] = {}
         self.phases: dict[str, int] = {}
         self.leading: dict[str, bytes] = {}
+        self.detectors: dict[str, webrtcvad.Vad] = {}
+        self.vad_pending: dict[str, bytes] = {}
         positions = np.arange(FILTER_TAPS) - (FILTER_TAPS - 1) / 2
         kernel = np.sinc(positions / RESAMPLE_FACTOR) * np.hamming(FILTER_TAPS)
         self.kernel = kernel / kernel.sum()
@@ -73,9 +76,9 @@ class Segmenter:
         values = self.resample(speaker_id, mono)
         if not len(values):
             return []
-        active = bool(np.sqrt(np.mean(values * values)) >= VAD_THRESHOLD)
         limits = np.iinfo(np.int16)
         audio = np.clip(np.rint(values), limits.min, limits.max).astype(np.int16).tobytes()
+        active = self.is_speech(speaker_id, audio)
         buffer = self.buffers.get(speaker_id)
         if buffer is None:
             if not active or len(self.buffers) >= MAX_SPEAKERS:
@@ -98,6 +101,19 @@ class Segmenter:
         if timestamp - buffer.last_speech >= SILENCE_SECONDS or buffer.samples >= SAMPLE_RATE * MAX_CHUNK_SECONDS:
             return [self.finish(speaker_id)]
         return []
+
+    def is_speech(self, speaker_id: str, audio: bytes) -> bool:
+        detector = self.detectors.get(speaker_id)
+        if detector is None:
+            detector = webrtcvad.Vad(1)
+            self.detectors[speaker_id] = detector
+        pending = self.vad_pending.get(speaker_id, b"") + audio
+        active = False
+        while len(pending) >= VAD_FRAME_BYTES:
+            active = detector.is_speech(pending[:VAD_FRAME_BYTES], SAMPLE_RATE) or active
+            pending = pending[VAD_FRAME_BYTES:]
+        self.vad_pending[speaker_id] = pending
+        return active
 
     def finish(self, speaker_id: str) -> Speech:
         buffer = self.buffers.pop(speaker_id)
