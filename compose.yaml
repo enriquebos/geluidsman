@@ -1,0 +1,80 @@
+name: geluidsman
+services:
+  app:
+    image: geluidsman-app:local
+    build:
+      context: .
+      target: app
+    restart: unless-stopped
+    init: true
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8687
+      DATA_DIR: /data
+      FFMPEG_PATH: ffmpeg
+      FFPROBE_PATH: ffprobe
+      JS_RUNTIME: deno
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-geluidsman}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-geluidsman}"
+    ports:
+      - "${PORT:-8687}:8687"
+    volumes:
+      - ./data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8687/api/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 40s
+  transcription:
+    image: geluidsman-transcription:local
+    build:
+      context: .
+      target: transcription
+    restart: unless-stopped
+    init: true
+    cpus: 4
+    mem_limit: 4g
+    volumes:
+      - transcription_models:/models
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-geluidsman}"
+      POSTGRES_DB: "${POSTGRES_DB:-geluidsman}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  test:
+    profiles: [test]
+    image: geluidsman-test:local
+    build:
+      context: .
+      target: test
+    environment:
+      TEST_DATABASE_URL: "postgresql://${POSTGRES_USER:-geluidsman}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/geluidsman_test"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  transcription_models:
