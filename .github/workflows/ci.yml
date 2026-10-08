@@ -37,6 +37,9 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y ffmpeg libopus0
       - name: Install Poetry
@@ -51,6 +54,11 @@ jobs:
         run: |
           poetry install --only main,dev --no-interaction
           npm ci --prefix frontend
+      - name: Verify media dependencies
+        run: |
+          deno --version
+          ffmpeg -version
+          ffprobe -version
       - name: Validate Python project
         run: |
           poetry check --lock
