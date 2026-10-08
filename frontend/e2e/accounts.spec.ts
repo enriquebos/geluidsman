@@ -106,14 +106,11 @@ test('card clicks and keyboard play in Discord while the main button previews lo
   const response = await request.post('/api/clips', { data: { source_id: 'fixture', name: 'Card interaction', emoji: '😂', start: 0, end: 1 } })
   const id = (await response.json()).id
   let plays = 0
-  await page.route('**/api/state*', async route => {
-    const response = await route.fetch()
-    const state = await response.json()
-    state.status.connected = true
-    state.status.bot_ready = true
-    state.status.playbacks = []
-    await route.fulfill({ response, json: state })
-  })
+  const state = await (await request.get('/api/state')).json()
+  state.status.connected = true
+  state.status.bot_ready = true
+  state.status.playbacks = []
+  await page.route('**/api/state*', route => route.fulfill({ json: state }))
   await page.route(`**/api/guilds/*/clips/${id}/play`, route => { plays++; return route.fulfill({ status: 201, json: { instance_id: `instance-${plays}` } }) })
   await page.goto('/soundboard')
   const card = page.locator('.sound-card').filter({ has: page.getByRole('heading', { name: 'Card interaction', exact: true }) })

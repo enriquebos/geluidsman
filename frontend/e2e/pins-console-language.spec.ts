@@ -10,16 +10,19 @@ test('pins update immediately without reloading state and roll back failures', a
   await page.goto('/soundboard')
   const button = page.getByRole('button', { name: `Pin ${name}`, exact: true })
   await expect(button).toBeVisible()
+  await expect.poll(() => stateRequests).toBe(2)
   const previous = stateRequests
   await page.route(`**/api/clips/${clip.id}/favourite`, async route => {
     await new Promise(resolve => setTimeout(resolve, 500))
     await route.continue()
     saved = true
   })
+  const pinSaved = page.waitForResponse(response => response.url().endsWith(`/api/clips/${clip.id}/favourite`) && response.request().method() === 'PUT')
   await button.click()
   const unpin = page.getByRole('button', { name: `Unpin ${name}`, exact: true }).first()
   await expect(unpin).toHaveAttribute('aria-pressed', 'true', { timeout: 300 })
   await expect.poll(() => saved).toBeTruthy()
+  expect((await pinSaved).ok()).toBe(true)
   expect(stateRequests).toBe(previous)
   await page.route(`**/api/clips/${clip.id}/favourite`, async route => {
     await new Promise(resolve => setTimeout(resolve, 250))
