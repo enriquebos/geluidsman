@@ -1,3 +1,4 @@
+import { selectOption } from './select-option'
 import { test, expect } from '@playwright/test'
 
 test('personal favourites move to the top and persist after reload', async ({ page, request }, testInfo) => {
@@ -68,7 +69,7 @@ test('admin has application settings and diagnostic console while ordinary setti
   expect(consoleBounds!.y).toBeLessThan(settingsBounds!.y)
   expect(await page.getByRole('checkbox', { name: 'Follow latest' }).evaluate(element => getComputedStyle(element).appearance)).toBe('none')
   await expect(page.getByRole('log', { name: 'Application logs' })).toContainText('detailed diagnostic')
-  await page.getByLabel('Log level').selectOption('INFO')
+  await selectOption(page.getByLabel('Log level'), 'INFO')
   await expect(page.getByRole('log')).toContainText('No log entries at this level.')
   await page.reload()
   await expect(page.getByRole('heading', { name: 'Application console' })).toBeVisible()

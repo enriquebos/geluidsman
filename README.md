@@ -497,7 +497,8 @@ Conversation triggers accept up to 20 alternative words or phrases, each in a se
 
 ### Transcription model and segmentation
 
-Admin → Settings → Application settings offers `large-v3-turbo` and `large-v3`.
+Admin → Settings → Application settings offers `large-v3-turbo`, `large-v3` and
+`yuriyvnv/whisper-large-v3-high-mixed-nl` (Dutch fine-tuned).
 The selection is stored in PostgreSQL. Only one model is loaded on the GPU.
 First use downloads to the persistent model volume; the status shows downloading,
 loading or restoring. Failed switches retain or reload the previous model.
@@ -505,6 +506,14 @@ Recording pauses and buffered speech is discarded during switching, so stale
 speech cannot fire triggers. Discord sound playback remains independent.
 The full model may improve recognition but is slower; compare representative Dutch
 speech before choosing it. No accuracy improvement has been measured yet.
+
+The Dutch fine-tuned model is pinned to revision
+`8975a419ff1300e407ef6ae00b70d756fc9a65d2`. Its original safetensors are
+downloaded and converted locally to CTranslate2 FP16 on first use. Both the
+download and completed conversion are cached in the persistent model volume.
+The worker has a 12 GB memory limit to accommodate conversion; CPU PyTorch is
+used only for conversion, while inference retains the configured GPU/CPU mode.
+Adding this option does not change the current selection or default model.
 
 Capture uses a separate WebRTC speech detector per speaker, 20 ms frames, a
 200 ms lead-in, 400 ms silence boundary and bounded five-second speech chunks.
@@ -516,3 +525,55 @@ hides the chat/history section and retains sound triggers. This is irreversible.
 Recording controls remain available for enabling a new conversation.
 
 Conversation shows only the live session, with no history selector or session pagination. Trigger search matches words, phrases and sound names immediately and case-insensitively; multiple search terms must all match.
+
+### Voice Actions
+
+Actions sits below Conversation at `/actions` and works even when recording is
+turned off. Grant **Access Actions page** in Admin → Permissions; it is off by
+default. **Manage action triggers** allows shared creation, editing and toggling.
+Only the creator or an administrator can delete a rule.
+
+Rules respond to camera, self-mute, self-deafen, stream and join/leave transitions
+in the bot's current channel on the configured server. Server-imposed mute and
+deafen, bots, other channels and initial connection states are ignored. Choose
+Play sound or Stop all sounds, everyone/creator/selected participants, a delay
+from 0–60 seconds and a shared cooldown from 0–3600 seconds. Defaults are camera
+enabled, Play sound, everyone, no delay and a five-second cooldown.
+
+Pending work is bounded to 128 and cancelled when the connection changes.
+Execution rechecks the unchanged rule, creator permissions, server membership,
+channel access and participant presence (leave actions allow an absent participant).
+Deleted sounds and capacity failures are skipped without retry and appear in the
+audit log. Successful playback also contributes to normal sound statistics.
+
+Deployment adds the action-trigger table while preserving existing users, media,
+permissions and jobs. The bot does not join voice at startup. Automated verification
+uses simulated events; real Discord events still require a user-controlled call.
+
+Actions additionally supports **First person joins**, ignoring bots when checking
+whether the channel was empty, and **Someone starts/stops speaking**. Speaking
+uses the voice receiver's activity transitions, with roughly 200 ms without voice
+packets ending a speaking period. It does not run a transcription model and may
+react to microphone noise. The bot must be undeafened; this never overrides an
+explicit deafen action. When recording is off, a lightweight receiver discards
+Opus packets without decoding or saving audio. Recording shares the same speaking
+events through its existing receiver. Receiver handoffs invalidate old callbacks,
+and connection changes discard speaking state and pending actions.
+
+The action editor groups controls into When, Who, Then and Timing, with a
+single-column layout on smaller screens.
+
+### Project conventions
+
+Follow [AGENT.md](AGENT.md) for UI, authorization, performance and verification rules.
+Conversation triggers are shared and unique per sound across all users; add alternative
+words to the existing trigger rather than creating another one. Speaker selection
+combines registered users and voice participants in one searchable checkbox dropdown.
+
+Sound playback requires the creator/player to be in the bot's active voice channel
+unless **Play sounds outside the voice channel** is granted (off by default).
+This also applies to automatic triggers. The speaker picker lists human guild
+members through Discord's REST API with a 60-second shared cache. The connection
+bar is the global header; sidebar participants show the active bot channel.
+
+Hall of shame is available at `/hall-of-shame` with the activity-view permission. Its all-time totals are initialized from existing audit records and then retained independently of audit cleanup. Activity already deleted before this feature cannot be recovered. The graph has an independent period filter. Graceful shutdown disconnects voice first; startup recovers only a channel Discord still reports the bot in after an abrupt stop. A hard kill or power loss cannot send a disconnect; Discord controls removal until startup recovery.

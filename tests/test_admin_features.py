@@ -164,6 +164,7 @@ def test_voice_flags_use_bot_self_state_and_require_connection(tmp_path: Path) -
     async def run() -> None:
         db = Database(tmp_path / "test.sqlite3")
         guild = Mock(voice_client=Mock(is_connected=Mock(return_value=True)), change_voice_state=AsyncMock())
+        guild.voice_client.channel.members = []
         bot = Mock(get_guild=Mock(return_value=guild))
         state = GuildVoice(Settings(_env_file=None), db, Events(), bot, 1352422295402057759)
         state.mixer = Mixer()

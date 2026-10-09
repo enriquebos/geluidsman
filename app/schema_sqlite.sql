@@ -109,3 +109,26 @@ CREATE TABLE IF NOT EXISTS conversation_triggers (
 CREATE INDEX IF NOT EXISTS conversations_time ON conversations(started_at DESC,id DESC);
 CREATE INDEX IF NOT EXISTS conversation_messages_time ON conversation_messages(session_id,started_at,id);
 CREATE INDEX IF NOT EXISTS conversation_triggers_owner ON conversation_triggers(owner_id);
+
+CREATE TABLE IF NOT EXISTS action_triggers (
+    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), event TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT 'play', clip_id TEXT NOT NULL DEFAULT '', target TEXT NOT NULL DEFAULT 'everyone',
+    speakers TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1,
+    delay DOUBLE PRECISION NOT NULL DEFAULT 0, cooldown DOUBLE PRECISION NOT NULL DEFAULT 5,
+    created_at DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS action_triggers_event ON action_triggers(event,enabled,created_at,id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS conversation_sound_unique ON conversation_triggers(clip_id) WHERE action='play';
+
+CREATE TABLE IF NOT EXISTS activity_totals (
+    actor_id TEXT PRIMARY KEY, name TEXT NOT NULL, created BIGINT NOT NULL DEFAULT 0, played BIGINT NOT NULL DEFAULT 0
+);
+INSERT INTO activity_totals(actor_id,name,created,played)
+SELECT actor_id,MAX(actor_name),SUM(CASE WHEN action='sound.create' THEN 1 ELSE 0 END),
+SUM(CASE WHEN action='sound.play' THEN 1 ELSE 0 END)
+FROM audit WHERE actor_id IS NOT NULL AND outcome='success' AND action IN ('sound.create','sound.play')
+AND NOT EXISTS (SELECT 1 FROM settings WHERE key='activity_totals_initialized')
+AND (guild_id IS NULL OR guild_id='1352422295402057759') GROUP BY actor_id
+ON CONFLICT(actor_id) DO NOTHING;
+INSERT INTO settings(key,value) VALUES ('activity_totals_initialized','true') ON CONFLICT(key) DO NOTHING;

@@ -12,6 +12,7 @@ CATALOGUE = [
     ("admin", "Access admin panel", "Administration"),
     ("high_volume", "Boost sound volume to 1000%", "Sounds"),
     ("play_sounds", "Play sounds", "Soundboard"),
+    ("play_outside_voice", "Play sounds outside the voice channel", "Soundboard"),
     ("stop_sounds", "Stop sounds and stop-all", "Soundboard"),
     ("connect_voice", "Connect or move the bot", "Voice"),
     ("disconnect_voice", "Disconnect the bot", "Voice"),
@@ -29,10 +30,21 @@ CATALOGUE = [
     ("view_conversations", "Access Conversation page", "Conversation"),
     ("control_recording", "Enable or disable recording", "Conversation"),
     ("manage_triggers", "Manage sound triggers", "Conversation"),
+    ("view_actions", "Access Actions page", "Actions"),
+    ("manage_actions", "Manage action triggers", "Actions"),
     ("view_audit", "View audit log", "Activity"),
 ]
 DEFAULTS = {
-    key: key not in {"admin", "high_volume", "mute_deafen", "master_volume", "view_conversations"}
+    key: key
+    not in {
+        "admin",
+        "high_volume",
+        "mute_deafen",
+        "master_volume",
+        "view_conversations",
+        "view_actions",
+        "play_outside_voice",
+    }
     for key, _label, _group in CATALOGUE
 }
 
@@ -72,3 +84,9 @@ def require_sound_permission(action: Literal["edit", "delete"]) -> Callable[[Req
         return user
 
     return verify
+
+
+def can_play_in_channel(user_id: str, permissions: dict, channel: object) -> bool:
+    return permissions.get("play_outside_voice", False) or any(
+        str(member.id) == user_id for member in getattr(channel, "members", [])
+    )

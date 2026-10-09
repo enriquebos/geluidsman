@@ -15,6 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.accounts import register_account_routes
+from app.action_routes import register_action_routes
+from app.actions import Actions
 from app.admin import register_admin_routes
 from app.auth import Auth, authorize, register_auth_routes
 from app.bot import Bot, GuildVoice, VoiceError
@@ -26,7 +28,7 @@ from app.events import Events
 from app.logs import ConsoleLogs
 from app.media import Media, MediaError
 from app.mixer import CapacityError
-from app.permissions import require_permission, require_sound_permission
+from app.permissions import can_play_in_channel, require_permission, require_sound_permission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -112,6 +114,17 @@ def validate_clip(start: float, end: float, duration: float, max_duration: float
         raise MediaError(msg)
 
 
+async def initialize_automation(app: FastAPI, settings: Settings) -> None:
+    db, events, bot = app.state.db, app.state.events, app.state.bot
+    app.state.conversation = Conversation(settings, db, events, bot)
+    bot.state.receiver = app.state.conversation
+    app.state.actions = Actions(settings, db, events, bot)
+    bot.actions = app.state.actions
+    bot.state.actions = app.state.actions
+    await app.state.actions.start()
+    await app.state.conversation.start()
+
+
 def create_app(settings: Settings | None = None, *, resume_channel_id: str | None = None) -> FastAPI:
     settings = settings or get_settings()
 
@@ -131,9 +144,7 @@ def create_app(settings: Settings | None = None, *, resume_channel_id: str | Non
         app.state.auth = Auth(settings, db, bot)
         app.state.clip_tasks = set()
         logging.getLogger("app").info("Website starting; admin console available")
-        app.state.conversation = Conversation(settings, db, events, bot)
-        bot.state.receiver = app.state.conversation
-        await app.state.conversation.start()
+        await initialize_automation(app, settings)
         await bot.start()
         try:
             if resume_channel_id:
@@ -142,13 +153,14 @@ def create_app(settings: Settings | None = None, *, resume_channel_id: str | Non
                     media.channels.resume(resume_channel_id)
             yield
         finally:
+            await bot.close()
+            await app.state.actions.close()
             await app.state.conversation.close()
             await app.state.auth.close()
             await media.close()
             for task in tuple(app.state.clip_tasks):
                 task.cancel()
             await asyncio.gather(*app.state.clip_tasks, return_exceptions=True)
-            await bot.close()
             db.close()
             root_logger.removeHandler(console)
             root_logger.setLevel(previous_level)
@@ -162,6 +174,7 @@ def create_app(settings: Settings | None = None, *, resume_channel_id: str | Non
     register_account_routes(app, settings)
     register_admin_routes(app)
     register_conversation_routes(app)
+    register_action_routes(app)
     register_state_routes(app, settings)
 
     register_library_routes(app, settings)
@@ -538,6 +551,11 @@ def register_voice_routes(app: FastAPI, _settings: Settings) -> None:
     )
     async def play(guild_id: str, clip_id: str, request: Request) -> dict[str, object]:
         state = await voice_target(app, request, guild_id)
+        user = request.state.user
+        if state.voice and not can_play_in_channel(user["id"], user["permissions"], state.voice.channel):
+            raise HTTPException(
+                403, "Join the bot's voice channel to play sounds, or request outside-channel playback permission."
+            )
         clip = app.state.db.one("SELECT * FROM clips WHERE id=?", (clip_id,))
         if not clip:
             raise HTTPException(404, "Sound not found.")
@@ -620,7 +638,9 @@ def register_media_routes(app: FastAPI, _settings: Settings) -> None:
 
     @app.get("/login", response_model=None)
     @app.get("/settings", response_model=None)
+    @app.get("/actions", response_model=None)
     @app.get("/conversation", response_model=None)
+    @app.get("/hall-of-shame", response_model=None)
     @app.get("/audit", response_model=None)
     @app.get("/admin", response_model=None)
     @app.get("/", response_model=None)

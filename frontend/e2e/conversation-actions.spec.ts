@@ -1,3 +1,4 @@
+import { selectOption } from './select-option'
 import { expect, test } from '@playwright/test'
 
 test('live-only conversation removes retention settings and supports delayed stop-all', async ({ page, request }, testInfo) => {
@@ -6,7 +7,7 @@ test('live-only conversation removes retention settings and supports delayed sto
   const dialog = page.getByRole('dialog', { name: 'New trigger', exact: true })
   const phrase = `Stop test ${testInfo.project.name}`
   await dialog.getByLabel('Word or phrase 1', { exact: true }).fill(phrase)
-  await dialog.getByLabel('Trigger action').selectOption('stop_all')
+  await selectOption(dialog.getByLabel('Trigger action'), 'stop_all')
   await expect(dialog.getByRole('button', { name: 'Trigger sound', exact: true })).toHaveCount(0)
   await dialog.getByLabel('Delay (seconds)').fill('1.5')
   await dialog.getByRole('button', { name: 'Save trigger', exact: true }).click()

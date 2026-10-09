@@ -18,6 +18,17 @@ MAX_RANGE_SECONDS = 91 * 86400
 
 
 def register_activity_routes(app: FastAPI, settings: Settings) -> None:
+    @app.get("/api/audit/leaderboard", dependencies=[Depends(require_permission("view_audit"))])
+    def leaderboard(sort: Literal["played", "created"] = "played") -> dict:
+        return {
+            "leaderboard": app.state.db.rows(
+                "SELECT a.actor_id AS user_id,COALESCE(u.display_name,a.name) AS name,u.avatar,a.created,a.played "
+                "FROM activity_totals a LEFT JOIN users u ON u.id=a.actor_id "
+                "ORDER BY CASE WHEN ?='played' THEN a.played ELSE a.created END DESC,name ASC LIMIT 50",
+                (sort,),
+            )
+        }
+
     @app.get("/api/audit/activity", dependencies=[Depends(require_permission("view_audit"))])
     def activity(
         after: Annotated[float, Query(ge=0, allow_inf_nan=False)],

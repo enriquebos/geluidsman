@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import time
 import wave
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -30,7 +31,6 @@ def test_custom_emoji_validation() -> None:
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
 
 @pytest.fixture
@@ -280,3 +280,20 @@ def test_capacity_error_does_not_log_traceback(client: TestClient, caplog: pytes
     records = [record for record in caplog.records if "capacity reached" in record.message]
     assert records
     assert all(record.exc_info is None and record.levelname == "WARNING" for record in records)
+
+
+def test_all_time_leaderboard_survives_audit_cleanup_and_restart(client: TestClient) -> None:
+    db = client.app.state.db
+    db.audit("100", "sound.create")
+    db.audit("100", "sound.play")
+    db.audit("100", "sound.play", outcome="rejected")
+    db.audit("100", "sound.play", guild_id="999")
+    db.execute("DELETE FROM audit")
+    data = client.get("/api/audit/leaderboard").json()
+    assert data["leaderboard"][0]["created"] == 1
+    assert data["leaderboard"][0]["played"] == 1
+    db.conn.executescript(Path(__file__).parents[1].joinpath("app/schema_sqlite.sql").read_text(encoding="utf-8"))
+    assert client.get("/api/audit/leaderboard").json() == data
+    assert client.get("/api/audit/leaderboard", params={"sort": "unknown"}).status_code == 422
+    db.execute("UPDATE users SET permission_overrides=? WHERE id=?", ('{"view_audit":false}', "100"))
+    assert client.get("/api/audit/leaderboard").status_code == 403

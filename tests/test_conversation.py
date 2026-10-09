@@ -700,6 +700,7 @@ def test_multiple_trigger_terms_persist_and_validate(client: TestClient) -> None
         assert (
             client.post("/api/conversation/triggers", json={**body, "phrase": phrase}, headers=csrf).status_code == 422
         )
+    assert client.delete(f"/api/conversation/triggers/{trigger_id}", headers=csrf).status_code == 200
     maximum = "\n".join(str(index).ljust(255, "x") for index in range(20))
     assert client.post("/api/conversation/triggers", json={**body, "phrase": maximum}, headers=csrf).status_code == 201
 
@@ -839,3 +840,65 @@ def test_admin_model_switch_validation_and_persistence(client: TestClient) -> No
     value.synchronize_model.return_value = {"ready": False, "target": "large-v3"}
     assert client.put(endpoint, json={"model": "large-v3-turbo"}, headers=headers(user)).status_code == 409
     assert client.app.state.db.setting("transcription_model") == "large-v3"
+
+
+def test_trigger_sound_action_unique_globally(client: TestClient) -> None:
+    user = login(client)
+    seed(client.app.state.db)
+    csrf = headers(user)
+    endpoint = "/api/conversation/triggers"
+    body = {"clip_id": "sound", "phrase": "hello"}
+    created = client.post(endpoint, json=body, headers=csrf)
+    assert created.status_code == 201
+    trigger_id = created.json()["id"]
+    assert client.post(endpoint, json={**body, "phrase": "other", "enabled": False}, headers=csrf).status_code == 409
+    assert (
+        client.put(f"{endpoint}/{trigger_id}", json={**body, "phrase": "hello\nother"}, headers=csrf).status_code == 200
+    )
+    stop = {"action": "stop_all", "clip_id": "sound", "phrase": "stop"}
+    stopped = client.post(endpoint, json=stop, headers=csrf)
+    assert stopped.status_code == 201
+    assert client.post(endpoint, json={**stop, "clip_id": "", "phrase": "enough"}, headers=csrf).status_code == 409
+    assert client.put(f"{endpoint}/{stopped.json()['id']}", json=body, headers=csrf).status_code == 409
+    client.app.state.db.execute(
+        "INSERT INTO users(id,username,display_name,created_at,last_login) VALUES ('200','other','Other',1,1)"
+    )
+    client.app.state.db.execute("UPDATE conversation_triggers SET owner_id='200' WHERE id=?", (trigger_id,))
+    assert client.post(endpoint, json=body, headers=csrf).status_code == 409
+    assert client.put(f"{endpoint}/{trigger_id}", json={**body, "phrase": "changed"}, headers=csrf).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "permission"), [("actions", "view_actions"), ("conversation", "view_conversations")]
+)
+def test_trigger_user_picker_requires_page_access(client: TestClient, endpoint: str, permission: str) -> None:
+    auth_login(client)
+    client.app.state.bot.guild_members = AsyncMock(return_value=[{"id": "100", "name": "Owner", "avatar": None}])
+    path = f"/api/{endpoint}/users"
+    assert client.get(path).status_code == 403
+    client.app.state.db.execute(
+        "UPDATE users SET permission_overrides=? WHERE id='100'", (json.dumps({permission: True}),)
+    )
+    users = client.get(path)
+    assert users.status_code == 200
+    assert users.json()["items"][0]["id"] == "100"
+    assert set(users.json()["items"][0]) == {"id", "name", "avatar"}
+
+
+def test_trigger_playback_presence_and_immediate_outside_permission(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "voice-permission.sqlite3")
+        seed(db)
+        value = manager(db)
+        value.bot.voice.channel.members = []
+        trigger = {"owner_id": "100", "action": "play"}
+        authorization = value.playback.authorization
+        assert await authorization(trigger, lambda: True, None) is not None
+        db.execute("UPDATE users SET permission_overrides=? WHERE id='100'", ('{"play_outside_voice":true}',))
+        assert await authorization(trigger, lambda: True, None) is None
+        db.execute("UPDATE users SET permission_overrides='{}' WHERE id='100'")
+        assert await authorization(trigger, lambda: True, None) is not None
+        assert await authorization({**trigger, "action": "stop_all"}, lambda: True, None) is None
+        db.close()
+
+    asyncio.run(scenario())

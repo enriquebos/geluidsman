@@ -47,3 +47,11 @@ def authenticated_fixture(app: FastAPI) -> None:
 
     app.state.auth.current = current
     app.state.auth.member = member
+
+    async def guild_members() -> list[dict]:
+        return [
+            {"id": "100", "name": "Test Member", "avatar": None},
+            {"id": "200", "name": "Fixture Member", "avatar": None},
+        ]
+
+    app.state.bot.guild_members = guild_members

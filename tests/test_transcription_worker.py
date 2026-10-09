@@ -114,10 +114,13 @@ def test_single_preserves_existing_decoder(client: TestClient, monkeypatch: pyte
     inference.assert_called_once_with(b"aa", "nl")
 
 
+@pytest.mark.parametrize("name", ["large-v3", "yuriyvnv/whisper-large-v3-high-mixed-nl"])
 @pytest.mark.parametrize("failure", [False, True])
-def test_model_switch_and_rollback(client: TestClient, monkeypatch: pytest.MonkeyPatch, *, failure: bool) -> None:
-    def load(name: str) -> object:
-        if failure and name == "large-v3":
+def test_model_switch_and_rollback(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, name: str, *, failure: bool
+) -> None:
+    def load(requested: str) -> object:
+        if failure and requested == name:
             message = "Unavailable"
             raise RuntimeError(message)
         return object()
@@ -125,11 +128,11 @@ def test_model_switch_and_rollback(client: TestClient, monkeypatch: pytest.Monke
     monkeypatch.setattr(worker, "load_model", load)
     monkeypatch.setattr(worker, "download_model", lambda _name: None)
     assert client.put("/model", json={"model": "unknown"}).status_code == 422
-    assert client.put("/model", json={"model": "large-v3"}).status_code == 202
+    assert client.put("/model", json={"model": name}).status_code == 202
     client.portal.call(lambda: worker.app.state.switch_task)
     health = client.get("/health").json()
     assert health["ready"]
-    assert health["model"] == ("large-v3-turbo" if failure else "large-v3")
+    assert health["model"] == ("large-v3-turbo" if failure else name)
     assert bool(health["error"]) == failure
 
 

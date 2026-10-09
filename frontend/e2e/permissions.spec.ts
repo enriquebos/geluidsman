@@ -1,3 +1,4 @@
+import { selectOption } from './select-option'
 import { test, expect } from '@playwright/test'
 
 test('admin tabs preserve console controls and scroll, reload and browser history', async ({ page }) => {
@@ -7,14 +8,14 @@ test('admin tabs preserve console controls and scroll, reload and browser histor
   const consoleView = page.getByRole('log', { name: 'Application logs' })
   await expect(consoleView).toContainText('Console line 100')
   await page.getByRole('checkbox', { name: 'Follow latest' }).uncheck()
-  await page.getByLabel('Log level').selectOption('INFO')
+  await selectOption(page.getByLabel('Log level'), 'INFO')
   await consoleView.evaluate(element => { element.scrollTop = 40 })
   const position = await consoleView.evaluate(element => element.scrollTop)
   await page.getByRole('tab', { name: 'Permissions', exact: true }).click()
   await expect(page).toHaveURL(/\/admin\?tab=permissions$/)
   await expect(page.getByRole('heading', { name: 'User permissions' })).toBeVisible()
   await expect(page.getByRole('checkbox', { name: 'Follow latest' })).not.toBeChecked()
-  await expect(page.getByLabel('Log level')).toHaveValue('INFO')
+  await expect(page.getByLabel('Log level')).toContainText('INFO')
   expect(await consoleView.evaluate(element => element.scrollTop)).toBe(position)
   await page.reload()
   await expect(page.getByRole('tab', { name: 'Permissions', exact: true })).toHaveAttribute('aria-selected', 'true')

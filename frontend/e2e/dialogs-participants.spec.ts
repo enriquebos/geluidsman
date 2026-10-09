@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-test('recording switch is themed and voice participants are clear', async ({ page }) => {
+test('recording switch is themed and duplicate voice participants are removed', async ({ page }) => {
   await page.route('**/api/conversations/status', route => route.fulfill({ json: { enabled: true, language: 'nl', recording: true, session: null, backlog: 0, dropped: 0, error: null, participants: [{ id: '100', name: 'Test Member', avatar: null }, { id: '200', name: 'Other Member', avatar: null }] } }))
   await page.goto('/conversation')
   const toggle = page.getByRole('switch', { name: 'Recording enabled' })
@@ -8,11 +8,8 @@ test('recording switch is themed and voice participants are clear', async ({ pag
   const style = await toggle.evaluate(element => { const style = getComputedStyle(element); return { width: style.width, height: style.height, appearance: style.appearance, checkmark: getComputedStyle(element, '::after').content } })
   expect(style).toMatchObject({ width: '44px', height: '26px', appearance: 'none' })
   expect(style.checkmark).not.toContain('✓')
-  const participants = page.getByRole('list', { name: 'Voice participants' })
-  await expect(participants.getByRole('listitem')).toHaveCount(2)
-  await expect(participants.getByRole('listitem').first()).toContainText('You')
-  await expect(participants.getByRole('listitem').last()).toContainText('Other Member')
-  await expect(participants.getByText('Listening for speech')).toHaveCount(2)
+  await expect(page.getByRole('list', { name: 'Voice participants' })).toHaveCount(0)
+  await expect(page.locator('.conversation-participants-section')).toHaveCount(0)
 })
 
 test('Escape closes upload and trigger dialogs from inputs, closing nested pickers first', async ({ page }) => {

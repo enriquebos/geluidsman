@@ -16,6 +16,7 @@ import discord
 from app.conversation_audio import ReceiveSink, Segmenter
 from app.db import DATABASE_ERRORS, new_id
 from app.permissions import effective_permissions
+from app.trigger_playback import PlaybackContext, TriggerPlayback, cancel_pending, reserve_cooldown
 
 if TYPE_CHECKING:
     from discord.ext.voice_recv import VoiceRecvClient
@@ -75,6 +76,7 @@ class Conversation:
         self.last_cleanup = 0.0
         self.receiver_retry = 0.0
         self.last_status = ""
+        self.playback = TriggerPlayback(settings, db, events, bot)
         self.model_status: dict = {}
         self.model_retry = 0.0
         self.model_lock = asyncio.Lock()
@@ -112,10 +114,9 @@ class Conversation:
             self.dropped += 1
 
     async def close_session(self) -> None:
-        for task in self.delayed:
-            task.cancel()
-        await asyncio.gather(*self.delayed, return_exceptions=True)
-        self.delayed.clear()
+        await cancel_pending(self.delayed)
+        if getattr(self.bot, "actions", None) and self.voice:
+            self.bot.actions.release_speech()
         self.allowed.clear()
         if self.voice and self.voice.is_listening():
             self.voice.stop_listening()
@@ -234,9 +235,14 @@ class Conversation:
         self.allowed = {str(member.id) for member in voice.channel.members if not member.bot}
         self.session, self.voice = session, voice
         try:
+            actions = getattr(self.bot, "actions", None)
+            if actions:
+                actions.release_speech()
             voice.listen(
                 ReceiveSink(
-                    lambda speaker, pcm, timestamp: self.receive(speaker, pcm, timestamp, session["id"]), self.allowed
+                    lambda speaker, pcm, timestamp: self.receive(speaker, pcm, timestamp, session["id"]),
+                    self.allowed,
+                    actions.speaking_callback(voice) if actions else None,
                 )
             )
         except (discord.ClientException, RuntimeError) as error:
@@ -423,10 +429,8 @@ class Conversation:
                 continue
             if trigger["target"] == "selected" and speech.speaker_id not in json.loads(trigger["speakers"]):
                 continue
-            now = time.monotonic()
-            if now - self.cooldowns.get(trigger["id"], float("-inf")) < trigger["cooldown"]:
+            if not reserve_cooldown(self.cooldowns, trigger):
                 continue
-            self.cooldowns[trigger["id"]] = now
             await self.schedule_trigger(trigger, session_id, speech)
 
     async def schedule_trigger(self, trigger: dict, session_id: str, speech: Speech) -> None:
@@ -467,87 +471,18 @@ class Conversation:
             await self.fire(latest, session_id, speech)
 
     async def fire(self, trigger: dict, session_id: str, speech: Speech) -> None:
-        user = await asyncio.to_thread(
-            self.db.one, "SELECT permission_overrides FROM users WHERE id=?", (trigger["owner_id"],)
+        await self.playback.execute(
+            trigger,
+            PlaybackContext(
+                {
+                    "trigger_id": trigger["id"],
+                    "speaker_id": speech.speaker_id,
+                    "action": trigger.get("action", "play"),
+                    "delay": trigger.get("delay", 0),
+                },
+                lambda: self.current(session_id, speech, trigger.get("delay", 0)),
+            ),
         )
-        clip = await asyncio.to_thread(self.db.one, "SELECT * FROM clips WHERE id=?", (trigger["clip_id"],))
-        stopping = trigger.get("action", "play") == "stop_all"
-        permission = "stop_sounds" if stopping else "play_sounds"
-        reason = None
-        instance = None
-        if (
-            not user
-            or not effective_permissions(
-                json.loads(user["permission_overrides"]), admin=trigger["owner_id"] in self.settings.app_admin_ids
-            )[permission]
-        ):
-            reason = "Creator no longer has permission for this trigger action."
-        elif not stopping and not clip:
-            reason = "The selected sound was deleted."
-        else:
-            guild = self.bot.client.get_guild(self.settings.discord_guild_id)
-            try:
-                member = None
-                if guild:
-                    member = guild.get_member(int(trigger["owner_id"])) or await guild.fetch_member(
-                        int(trigger["owner_id"])
-                    )
-                if (
-                    not self.current(session_id, speech, trigger.get("delay", 0))
-                    or not member
-                    or not self.voice
-                    or not self.voice.channel.permissions_for(member).view_channel
-                    or not self.voice.channel.permissions_for(member).connect
-                    or not await asyncio.to_thread(self.permitted, trigger["owner_id"], permission)
-                ):
-                    reason = "Creator no longer has playback permission or access to the active voice channel."
-                elif stopping:
-                    await self.stop_trigger(trigger, speech)
-                else:
-                    instance = self.bot.state.play(self.settings.data_dir / "media" / clip["id"] / "sound.wav", clip)
-            except (discord.DiscordException, ValueError, OSError):
-                reason = "Playback unavailable, permission denied, or all playback slots are in use."
-        details = {
-            "trigger_id": trigger["id"],
-            "speaker_id": speech.speaker_id,
-            "action": trigger.get("action", "play"),
-            "delay": trigger.get("delay", 0),
-        }
-        if reason:
-            details["reason"] = reason
-        if instance:
-            await asyncio.to_thread(
-                self.db.audit,
-                trigger["owner_id"],
-                "sound.play",
-                clip["id"],
-                clip["name"],
-                guild_id=str(self.settings.discord_guild_id),
-                details=details,
-            )
-        await asyncio.to_thread(
-            self.db.audit,
-            trigger["owner_id"],
-            "trigger.play",
-            trigger["id"],
-            "Stop all sounds" if stopping else clip["name"] if clip else "Deleted sound",
-            outcome="rejected" if reason else "success",
-            details=details,
-        )
-        self.events.publish("audit")
-        self.events.publish("conversation")
-
-    async def stop_trigger(self, trigger: dict, speech: Speech) -> None:
-        if self.bot.state.mixer:
-            self.bot.state.mixer.stop()
-        await asyncio.to_thread(
-            self.db.audit,
-            trigger["owner_id"],
-            "sound.stop_all",
-            guild_id=str(self.settings.discord_guild_id),
-            details={"trigger_id": trigger["id"], "speaker_id": speech.speaker_id},
-        )
-        self.events.publish("playback")
 
     def permitted(self, owner_id: str, permission: str = "play_sounds") -> bool:
         user = self.db.one("SELECT permission_overrides FROM users WHERE id=?", (owner_id,))

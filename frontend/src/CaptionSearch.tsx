@@ -1,3 +1,4 @@
+import { ThemedSelect } from './ThemedSelect'
 import { useEffect, useState } from 'react'
 import { CaptionMatch, Source, timeLabel, preferences } from './types'
 
@@ -46,7 +47,7 @@ export function CaptionSearch({ source, onSelect, onUse, onError }: { source?: S
   }
 
   return <section className="caption-panel" aria-label={source ? 'Search this video’s captions' : 'Search library captions'}>
-    <div className="caption-heading"><div><h2>Find the words</h2><p>{source ? 'Search speech in this video.' : 'Search speech across your video library.'}</p></div><select aria-label="Caption language" value={language} onChange={event => setLanguage(event.target.value as 'all' | 'nl' | 'en')}><option value="all">Dutch + English</option><option value="nl">Dutch</option><option value="en">English</option></select></div>
+    <div className="caption-heading"><div><h2>Find the words</h2><p>{source ? 'Search speech in this video.' : 'Search speech across your video library.'}</p></div><ThemedSelect aria-label="Caption language" value={language} onChange={selected => setLanguage(selected as 'all' | 'nl' | 'en')}><option value="all">Dutch + English</option><option value="nl">Dutch</option><option value="en">English</option></ThemedSelect></div>
     <input aria-label="Search captions" placeholder="Words or a phrase…" value={query} maxLength={200} onChange={event => setQuery(event.target.value)} />
     {source && <p className="caption-status">{source.captions?.length ? source.captions.map(track => `${track.language === 'nl' ? 'Dutch' : 'English'}: ${track.status === 'ready' ? track.kind + ' captions' : track.error || track.status}`).join(' · ') : 'Captions not downloaded. Redownload this video to fetch them.'}</p>}
     <div aria-live="polite">{loading && <p>Searching captions…</p>}{query.trim() && !loading && !results.length && <p>No matching captions. Try other words or another language.</p>}</div>

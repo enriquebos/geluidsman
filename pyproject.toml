@@ -28,6 +28,20 @@ tokenizers = {version = ">=0.21,<0.23", python = ">=3.11,<3.14"}
 huggingface-hub = {version = ">=0.34,<1", python = ">=3.11,<3.14"}
 faster-whisper = {version = ">=1.2,<2", python = ">=3.11,<3.14"}
 
+[tool.poetry.group.worker.dependencies.transformers]
+version = ">=4.55,<4.58"
+python = ">=3.11,<3.14"
+
+[tool.poetry.group.worker.dependencies.torch]
+version = "2.8.0"
+source = "pytorch-cpu"
+python = ">=3.11,<3.14"
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
+
 [tool.poetry.group.gpu]
 optional = true
 
@@ -53,6 +67,7 @@ ignore = ["D", "CPY001", "COM812", "ISC001"]
 "tests/**" = ["S101", "PLR2004", "SLF001"]
 "app/config.py" = ["S104"]
 "app/transcription_worker.py" = ["S104", "PLC0415"]
+"app/transcription_models.py" = ["PLC0415"]
 "app/network.py" = ["N815"]
 "app/mixer.py" = ["SIM115"]
 "app/download_worker.py" = ["SLF001"]

@@ -1,3 +1,4 @@
+import { selectOption } from './select-option'
 import { execFileSync } from 'node:child_process'
 import { expect, test } from '@playwright/test'
 
@@ -41,7 +42,7 @@ test('upload audio from soundboard with metadata, preview, persist and delete', 
 
 test('caption search finds short prefixes and typos, highlighting speech', async ({ page }) => {
   await page.goto('/videos')
-  await page.getByLabel('Caption language').selectOption('en')
+  await selectOption(page.getByLabel('Caption language'), 'en')
   await page.getByLabel('Search captions').fill('bea')
   await expect(page.locator('.caption-result').first()).toContainText('beautiful')
   await expect(page.locator('.caption-result mark').first()).toHaveText('beautiful')

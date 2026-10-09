@@ -129,11 +129,39 @@ class Segmenter:
         ]
 
 
-class ReceiveSink(voice_recv.AudioSink):
-    def __init__(
-        self, callback: Callable[[tuple[str, str, str | None], bytes, float], None], allowed: set[str]
-    ) -> None:
+class SpeakingSink(voice_recv.AudioSink):
+    def __init__(self, speaking: Callable[[Member | User | None, str], None] | None = None) -> None:
         super().__init__()
+        self.speaking = speaking
+
+    def wants_opus(self) -> bool:
+        return True
+
+    def write(self, _user: Member | User | None, _data: voice_recv.VoiceData) -> None:
+        return
+
+    @voice_recv.AudioSink.listener()
+    def on_voice_member_speaking_start(self, member: Member | User | None) -> None:
+        if self.speaking:
+            self.speaking(member, "speaking_start")
+
+    @voice_recv.AudioSink.listener()
+    def on_voice_member_speaking_stop(self, member: Member | User | None) -> None:
+        if self.speaking:
+            self.speaking(member, "speaking_stop")
+
+    def cleanup(self) -> None:
+        self.speaking = None
+
+
+class ReceiveSink(SpeakingSink):
+    def __init__(
+        self,
+        callback: Callable[[tuple[str, str, str | None], bytes, float], None],
+        allowed: set[str],
+        speaking: Callable[[Member | User | None, str], None] | None = None,
+    ) -> None:
+        super().__init__(speaking)
         self.callback, self.allowed = callback, allowed
 
     def wants_opus(self) -> bool:
@@ -146,4 +174,5 @@ class ReceiveSink(voice_recv.AudioSink):
         self.callback((str(user.id), user.display_name, avatar), data.pcm, time.time())
 
     def cleanup(self) -> None:
+        super().cleanup()
         self.allowed.clear()

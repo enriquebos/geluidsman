@@ -30,7 +30,7 @@ def database(tmp_path: Path) -> Iterator[Database]:
     assert urlsplit(URL).path == "/geluidsman_test"
     connection = Connection(URL)
     connection.initialize()
-    connection.raw.execute("TRUNCATE users,sources,settings,oauth_states,audit,channel_batches CASCADE")
+    connection.raw.execute("TRUNCATE users,sources,settings,oauth_states,audit,channel_batches,activity_totals CASCADE")
     connection.close()
     db = Database(tmp_path / "unused.sqlite3", URL)
     yield db
@@ -80,6 +80,7 @@ def test_postgres_api(database: Database, tmp_path: Path) -> None:
             "/api/admin/users",
             "/api/captions/search?q=Hallo",
             "/api/audit",
+            "/api/audit/leaderboard",
             "/api/audit/activity?after=1700000000&until=1700003600",
         ):
             response = client.get(endpoint)
@@ -103,6 +104,10 @@ def test_postgres_api(database: Database, tmp_path: Path) -> None:
         assert activity.status_code == 200, activity.text
         assert activity.json()["total_played"] == 1
         assert activity.json()["leaderboard"][0]["played"] == 1
+        app.state.db.execute("DELETE FROM audit")
+        assert client.get("/api/audit/leaderboard").json()["leaderboard"][0]["played"] == 1
+        app.state.db.conn.initialize()
+        assert client.get("/api/audit/leaderboard").json()["leaderboard"][0]["played"] == 1
 
 
 def test_postgres_persistence_and_interrupted_jobs(database: Database, tmp_path: Path) -> None:
@@ -120,3 +125,31 @@ def test_postgres_persistence_and_interrupted_jobs(database: Database, tmp_path:
     recovered.audit("100", "test.action", details={"nested": {"ok": True}})
     assert json.loads(recovered.rows("SELECT * FROM audit ORDER BY id DESC")[0]["details"])["nested"]["ok"]
     recovered.close()
+
+
+def test_postgres_action_rules_persistence_and_audit(database: Database) -> None:
+    now = time.time()
+    database.execute(
+        "INSERT INTO users(id,username,display_name,created_at,last_login) VALUES (?,?,?,?,?)",
+        ("action-owner", "owner", "Owner", now, now),
+    )
+    database.change(
+        "INSERT INTO action_triggers(id,owner_id,event,action,delay,cooldown,created_at) VALUES (?,?,?,?,?,?,?)",
+        ("voice-rule", "action-owner", "camera_on", "stop_all", 1.5, 5, now),
+        "action-owner",
+        "action_trigger.create",
+        resource_id="voice-rule",
+        name="Camera enabled",
+        details={"event_label": "Camera enabled", "action": "stop_all"},
+    )
+    saved = database.one("SELECT * FROM action_triggers WHERE id='voice-rule'")
+    assert saved["delay"] == 1.5
+    assert saved["enabled"] == 1
+    assert (
+        json.loads(database.one("SELECT details FROM audit WHERE action='action_trigger.create'")["details"])["action"]
+        == "stop_all"
+    )
+    database.execute("UPDATE action_triggers SET enabled=0 WHERE id='voice-rule'")
+    assert not database.one("SELECT enabled FROM action_triggers WHERE id='voice-rule'")["enabled"]
+    database.execute("DELETE FROM action_triggers WHERE id='voice-rule'")
+    assert not database.rows("SELECT * FROM action_triggers")

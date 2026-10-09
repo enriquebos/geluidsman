@@ -9,8 +9,9 @@ from typing import TYPE_CHECKING, Annotated, Literal
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request
-from pydantic import BaseModel
 from requests import RequestException
+
+from app.transcription_models import DUTCH_MODEL, ModelSelection, convert_dutch_model, model_path
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -26,7 +27,7 @@ def load_model(name: str = "large-v3-turbo") -> object:
 
     device = os.environ.get("TRANSCRIPTION_DEVICE", "cuda")
     return WhisperModel(
-        name,
+        model_path(name),
         device=device,
         compute_type=os.environ.get("TRANSCRIPTION_COMPUTE_TYPE", "float16" if device == "cuda" else "int8"),
         cpu_threads=4,
@@ -85,14 +86,17 @@ def health() -> dict:
     }
 
 
-class ModelInput(BaseModel):
-    model: Literal["large-v3-turbo", "large-v3"]
+class ModelInput(ModelSelection):
+    pass
 
 
 def download_model(name: str) -> None:
     from faster_whisper.utils import download_model as download
 
-    download(name, cache_dir="/models")
+    if name == DUTCH_MODEL:
+        convert_dutch_model()
+    else:
+        download(name, cache_dir="/models")
 
 
 async def replace_model(name: str) -> None:

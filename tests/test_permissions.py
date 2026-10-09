@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
 
@@ -11,6 +12,7 @@ from app.db import Database
 from app.permissions import DEFAULTS
 from tests.test_auth import GUILD, headers, login
 from tests.test_auth import client as auth_fixture
+from tests.test_conversation import seed
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -164,6 +166,7 @@ def test_grant_and_revoke_affect_existing_session_without_admin_access(client: T
     bot = client.app.state.bot
     channel = Mock(id=123)
     channel.name = "Test"
+    channel.members = []
     guild = Mock(voice_client=Mock(channel=channel, disconnect=AsyncMock()))
     bot.client.is_ready = lambda: True
     bot.client.get_guild = lambda _: guild
@@ -306,3 +309,24 @@ def test_boost_volume_permission_on_all_writes(client: TestClient, volume: float
     assert client.patch("/api/clips/sound", json={**payload, "volume": 10.05}, headers=headers(user)).status_code == 422
     override(client, {})
     assert client.patch("/api/clips/sound", json=payload, headers=headers(user)).status_code == 403
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [(False, False, True, 403), (True, False, True, 201), (False, True, True, 201), (False, True, False, 403)],
+)
+def test_playback_requires_voice_presence_or_explicit_permission(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, scenario: tuple[bool, bool, bool, int]
+) -> None:
+    present, outside, play, status = scenario
+    user = login(client)
+    seed(client.app.state.db)
+    override(client, {"play_outside_voice": outside, "play_sounds": play})
+    channel = SimpleNamespace(members=[SimpleNamespace(id=100)] if present else [])
+    state = SimpleNamespace(voice=SimpleNamespace(channel=channel), play=Mock(return_value="instance"), status=dict)
+    monkeypatch.setattr("app.main.voice_target", AsyncMock(return_value=state))
+    response = client.post(f"/api/guilds/{GUILD}/clips/sound/play", headers=headers(user))
+    assert response.status_code == status
+    assert state.play.call_count == int(status == 201)
+    assert client.get("/api/auth/me").status_code == 200
+    assert not DEFAULTS["play_outside_voice"]

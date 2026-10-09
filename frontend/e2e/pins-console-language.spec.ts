@@ -1,3 +1,4 @@
+import { selectOption } from './select-option'
 import { expect, test } from '@playwright/test'
 
 test('pins update immediately without reloading state and roll back failures', async ({ page, request }, testInfo) => {
@@ -61,11 +62,11 @@ test('conversation has connection controls and defaults to persistent Dutch tran
   await expect(page.getByText('Connect to Discord', { exact: true })).toBeVisible()
   await expect(page.getByLabel('Voice channel')).toBeVisible()
   const language = page.getByLabel('Conversation language')
-  await expect(language).toHaveValue('nl')
-  await language.selectOption('en')
+  await expect(language).toContainText('Dutch')
+  await selectOption(language, 'en')
   await expect(page.getByText('Conversation language saved.')).toBeVisible()
   await page.reload()
-  await expect(language).toHaveValue('en')
-  await language.selectOption('nl')
+  await expect(language).toContainText('English')
+  await selectOption(language, 'nl')
   await expect(page.getByText('Conversation language saved.')).toBeVisible()
 })

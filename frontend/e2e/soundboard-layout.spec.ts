@@ -126,3 +126,31 @@ test('newest sounds appear first and restricted volume cannot exceed 300% on a 1
   await volume.press('ArrowRight')
   await expect(volume).toHaveValue('3')
 })
+
+
+test('compact long names use two lines and preserve hover controls', async ({ page }) => {
+  const clips = samples.slice(0, 2).map((clip, index) => ({ ...clip, name: index ? 'W'.repeat(120) : '52 Bomboclat Puswago with a much longer sound name', pinned: false, user_play_count: 0, play_count: 0 }))
+  await page.route('**/api/state*', async route => {
+    const response = await route.fetch()
+    const state = await response.json()
+    await route.fulfill({ json: { ...state, clips } })
+  })
+  await page.goto('/soundboard')
+  await page.getByRole('button', { name: 'Compact', exact: true }).click()
+  const cards = page.getByRole('region', { name: 'All sounds', exact: true }).locator('.compact-sound')
+  await expect(cards).toHaveCount(2)
+  for (const card of await cards.all()) {
+    const name = card.locator('h3')
+    await expect(name).toBeVisible()
+    const height = await name.evaluate(element => element.getBoundingClientRect().height)
+    expect(height).toBe(32)
+    const before = await name.boundingBox()
+    await card.hover()
+    await expect(card.locator('.compact-preview')).toBeVisible()
+    await expect(card.locator('.compact-pin')).toBeVisible()
+    expect((await name.boundingBox())!.height).toBe(before!.height)
+    expect(await card.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+  }
+  await page.getByRole('button', { name: 'Default', exact: true }).click()
+  await expect(page.locator('.compact-sound')).toHaveCount(0)
+})

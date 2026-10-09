@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.auth import authorize_admin
 from app.db import new_id
 from app.permissions import require_permission
+from app.transcription_models import ModelSelection
 
 MAX_DISCORD_ID = 20
 MESSAGE_PAGE_SIZE = 100
@@ -23,8 +24,8 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
 
-class TranscriptionInput(BaseModel):
-    model: Literal["large-v3-turbo", "large-v3"]
+class TranscriptionInput(ModelSelection):
+    pass
 
 
 class RecordingInput(BaseModel):
@@ -136,7 +137,15 @@ def register_conversation_routes(app: FastAPI) -> None:
         return {"session": session, "items": list(reversed(rows[:100])), "has_older": len(rows) > MESSAGE_PAGE_SIZE}
 
 
+def register_trigger_users(app: FastAPI, path: str, permission: str) -> None:
+    @app.get(path, dependencies=[Depends(require_permission(permission))])
+    async def users() -> dict:
+        return {"items": await app.state.bot.guild_members()}
+
+
 def register_trigger_routes(app: FastAPI) -> None:
+    register_trigger_users(app, "/api/conversation/users", "view_conversations")
+
     @app.get("/api/conversation/triggers", dependencies=[Depends(require_permission("view_conversations"))])
     def triggers() -> dict:
         rows = app.state.db.rows(
@@ -157,30 +166,32 @@ def register_trigger_routes(app: FastAPI) -> None:
         dependencies=[Depends(require_permission("view_conversations", "manage_triggers"))],
     )
     def create_trigger(body: TriggerInput, request: Request) -> dict:
-        check_trigger(app, body)
-        trigger_id = new_id()
-        app.state.db.change(
-            "INSERT INTO conversation_triggers(id,owner_id,clip_id,phrase,mode,target,speakers,cooldown,enabled,"
-            "created_at,action,delay) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                trigger_id,
+        with app.state.db.lock:
+            check_trigger(app, body)
+            check_unique_trigger(app, body)
+            trigger_id = new_id()
+            app.state.db.change(
+                "INSERT INTO conversation_triggers(id,owner_id,clip_id,phrase,mode,target,speakers,cooldown,enabled,"
+                "created_at,action,delay) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    trigger_id,
+                    request.state.user["id"],
+                    body.clip_id,
+                    body.phrase,
+                    body.mode,
+                    body.target,
+                    json.dumps(body.speakers),
+                    body.cooldown,
+                    int(body.enabled),
+                    time.time(),
+                    body.action,
+                    body.delay,
+                ),
                 request.state.user["id"],
-                body.clip_id,
-                body.phrase,
-                body.mode,
-                body.target,
-                json.dumps(body.speakers),
-                body.cooldown,
-                int(body.enabled),
-                time.time(),
-                body.action,
-                body.delay,
-            ),
-            request.state.user["id"],
-            "trigger.create",
-            resource_id=trigger_id,
-            name=body.phrase,
-        )
+                "trigger.create",
+                resource_id=trigger_id,
+                name=body.phrase,
+            )
         app.state.events.publish("conversation")
         return {"id": trigger_id}
 
@@ -189,29 +200,31 @@ def register_trigger_routes(app: FastAPI) -> None:
         dependencies=[Depends(require_permission("view_conversations", "manage_triggers"))],
     )
     def update_trigger(trigger_id: str, body: TriggerInput, request: Request) -> dict:
-        existing_trigger(app, trigger_id)
-        check_trigger(app, body)
-        app.state.db.change(
-            "UPDATE conversation_triggers SET clip_id=?,phrase=?,mode=?,target=?,speakers=?,"
-            "cooldown=?,enabled=?,action=?,delay=? "
-            "WHERE id=?",
-            (
-                body.clip_id,
-                body.phrase,
-                body.mode,
-                body.target,
-                json.dumps(body.speakers),
-                body.cooldown,
-                int(body.enabled),
-                body.action,
-                body.delay,
-                trigger_id,
-            ),
-            request.state.user["id"],
-            "trigger.update",
-            resource_id=trigger_id,
-            name=body.phrase,
-        )
+        with app.state.db.lock:
+            existing_trigger(app, trigger_id)
+            check_trigger(app, body)
+            check_unique_trigger(app, body, trigger_id)
+            app.state.db.change(
+                "UPDATE conversation_triggers SET clip_id=?,phrase=?,mode=?,target=?,speakers=?,"
+                "cooldown=?,enabled=?,action=?,delay=? "
+                "WHERE id=?",
+                (
+                    body.clip_id,
+                    body.phrase,
+                    body.mode,
+                    body.target,
+                    json.dumps(body.speakers),
+                    body.cooldown,
+                    int(body.enabled),
+                    body.action,
+                    body.delay,
+                    trigger_id,
+                ),
+                request.state.user["id"],
+                "trigger.update",
+                resource_id=trigger_id,
+                name=body.phrase,
+            )
         app.state.events.publish("conversation")
         return {"ok": True}
 
@@ -257,7 +270,18 @@ def register_transcription_routes(app: FastAPI) -> None:
         return status
 
 
+def check_unique_trigger(app: FastAPI, body: TriggerInput, trigger_id: str = "") -> None:
+    duplicate = app.state.db.one(
+        "SELECT id FROM conversation_triggers WHERE action=? AND (action='stop_all' OR clip_id=?) AND id<>? LIMIT 1",
+        (body.action, body.clip_id, trigger_id),
+    )
+    if duplicate:
+        raise HTTPException(409, "A trigger already exists for this sound/action. Add words to the existing trigger.")
+
+
 def check_trigger(app: FastAPI, body: TriggerInput) -> None:
+    if body.action == "stop_all":
+        body.clip_id = ""
     if body.action == "play" and not app.state.db.one("SELECT id FROM clips WHERE id=?", (body.clip_id,)):
         raise HTTPException(404, "Sound not found.")
     if body.target == "selected" and not body.speakers:

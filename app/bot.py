@@ -20,6 +20,9 @@ if TYPE_CHECKING:
     from app.types import JsonObject
 
 
+GUILD_MEMBER_PAGE_SIZE = 1000
+
+
 class VoiceError(ValueError):
     pass
 
@@ -39,6 +42,7 @@ class GuildVoice:
         self.retry_delay = 5.0
         self.connection_task = None
         self.receiver = None
+        self.actions = None
         self.master_volume = db.setting(f"guild:{guild_id}:master_volume", 0.8)
 
     @property
@@ -86,6 +90,11 @@ class GuildVoice:
             "deafened": self.deafened,
             "max_playbacks": self.settings.max_playbacks,
             "playbacks": self.mixer.snapshot() if self.mixer else [],
+            "participants": [
+                {"id": str(member.id), "name": member.display_name, "avatar": str(member.display_avatar.url)}
+                for member in (voice.channel.members if voice and voice.is_connected() else [])
+                if not member.bot
+            ],
         }
 
     async def connect(self, channel_id: str) -> None:
@@ -118,6 +127,8 @@ class GuildVoice:
             await self.connection_task
             self.mixer = Mixer(self.settings.max_playbacks, self.master_volume, self.notify_playback)
             self.mixer.muted = self.muted
+            if self.actions:
+                self.actions.synchronize()
         except asyncio.CancelledError:
             await self.disconnect_unlocked()
             if asyncio.current_task().cancelling():
@@ -158,6 +169,8 @@ class GuildVoice:
                 self.retry_delay = 5.0
 
     async def disconnect_unlocked(self) -> None:
+        if self.actions:
+            self.actions.invalidate()
         if self.receiver:
             await self.receiver.close_session()
         if self.mixer:
@@ -237,6 +250,12 @@ class GuildVoice:
 class Bot:
     def __init__(self, settings: Settings, db: Database, events: Events) -> None:
         self.settings, self.db, self.events = settings, db, events
+        self.actions = None
+        self.startup_recovery_checked = False
+        self.closing = False
+        self.directory_cache = []
+        self.directory_expires = 0.0
+        self.directory_lock = asyncio.Lock()
         intents = discord.Intents.none()
         intents.guilds = True
         intents.voice_states = True
@@ -251,16 +270,16 @@ class Bot:
         @self.client.event
         async def on_ready() -> None:
             self.error = None
+            self.directory_expires = 0.0
             logging.getLogger("app.bot").info("Discord bot connected")
             self.remember_guild_names()
+            await self.recover_startup_voice()
             self.events.publish("refresh")
 
         @self.client.event
         async def on_disconnect() -> None:
-            if self.state.receiver:
-                await self.state.receiver.close_session()
-            if self.state.mixer:
-                self.state.mixer.stop()
+            async with self.state.lock:
+                await self.state.disconnect_unlocked()
             self.events.publish("status")
 
         @self.client.event
@@ -278,6 +297,12 @@ class Bot:
     async def voice_state_changed(
         self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
     ) -> None:
+        if member.guild.id == self.settings.discord_guild_id and not member.bot:
+            self.events.publish("status")
+        if self.actions:
+            self.actions.receive(member, before, after)
+            if self.client.user and member.id == self.client.user.id and before.channel != after.channel:
+                self.actions.invalidate()
         if self.client.user and member.id == self.client.user.id:
             state = self.state if member.guild.id == self.settings.discord_guild_id else None
             if state:
@@ -289,6 +314,54 @@ class Bot:
             if before.channel != after.channel and state and state.mixer:
                 state.mixer.stop()
             self.events.publish("status")
+
+    async def recover_startup_voice(self) -> None:
+        if self.startup_recovery_checked or self.closing:
+            return
+        self.startup_recovery_checked = True
+        guild = self.client.get_guild(self.settings.discord_guild_id)
+        member_voice = guild.me.voice if guild and guild.me else None
+        if not member_voice or not member_voice.channel or self.state.voice or self.state.desired_channel_id:
+            return
+        self.state.update_flags(muted=member_voice.self_mute, deafened=member_voice.self_deaf or member_voice.deaf)
+        try:
+            await self.state.connect(str(member_voice.channel.id))
+        except VoiceError:
+            self.state.error = "Could not recover the existing Discord voice connection. Connect manually to retry."
+            self.events.publish("status")
+
+    async def guild_members(self) -> list[JsonObject]:
+        async with self.directory_lock:
+            if time.monotonic() < self.directory_expires:
+                return self.directory_cache
+            if not self.client.is_ready():
+                message = "Discord is offline. Try the speaker list again shortly."
+                raise VoiceError(message)
+            members = []
+            after = None
+            while True:
+                page = await self.client.http.get_members(
+                    self.settings.discord_guild_id, limit=GUILD_MEMBER_PAGE_SIZE, after=after
+                )
+                for member in page:
+                    user = member["user"]
+                    if not user.get("bot", False):
+                        avatar = user.get("avatar")
+                        members.append(
+                            {
+                                "id": user["id"],
+                                "name": member.get("nick") or user.get("global_name") or user["username"],
+                                "avatar": f"https://cdn.discordapp.com/avatars/{user['id']}/{avatar}.png"
+                                if avatar
+                                else None,
+                            }
+                        )
+                if len(page) < GUILD_MEMBER_PAGE_SIZE:
+                    break
+                after = int(page[-1]["user"]["id"])
+            self.directory_cache = sorted(members, key=lambda member: member["name"].casefold())
+            self.directory_expires = time.monotonic() + 60
+            return self.directory_cache
 
     def emojis_changed(self, guild_id: int) -> None:
         if guild_id == self.settings.discord_guild_id:
@@ -394,11 +467,14 @@ class Bot:
         self.monitor_task = asyncio.create_task(monitor())
 
     async def close(self) -> None:
+        self.closing = True
         if self.monitor_task:
             self.monitor_task.cancel()
             await asyncio.gather(self.monitor_task, return_exceptions=True)
-        await self.state.disconnect()
-        await self.client.close()
+        try:
+            await self.state.disconnect()
+        finally:
+            await self.client.close()
         if self.task:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)

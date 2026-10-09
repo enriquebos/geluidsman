@@ -1,3 +1,4 @@
+import { selectOption } from './select-option'
 import { test, expect } from '@playwright/test'
 
 test('anonymous users get Discord login with their original destination', async ({ page }) => {
@@ -19,14 +20,14 @@ test('creator, settings persistence and searchable audit page', async ({ page, r
   await expect(card.getByText('By Test Member')).toBeVisible()
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await expect(page).toHaveURL(/\/settings$/)
-  await page.getByLabel('Preferred caption language').selectOption('nl')
+  await selectOption(page.getByLabel('Preferred caption language'), 'nl')
   await page.getByLabel('Browser preview volume').fill('0.4')
   const save = page.waitForRequest(request => request.url().endsWith('/api/settings/personal') && request.method() === 'PUT')
   await page.getByRole('button', { name: 'Save preferences', exact: true }).click()
   expect((await save).headers()['x-csrf-token']).toBe('fixture-csrf')
   await expect(page.getByText('Preferences saved.')).toBeVisible()
   await page.reload()
-  await expect(page.getByLabel('Preferred caption language')).toHaveValue('nl')
+  await expect(page.getByLabel('Preferred caption language')).toContainText('Dutch')
   await expect(page.getByLabel('Browser preview volume')).toHaveValue('0.4')
   await page.getByRole('button', { name: 'Audit log', exact: true }).click()
   await expect(page).toHaveURL(/\/audit$/)
@@ -63,7 +64,7 @@ test('settings units convert to bytes and preferences use a toast', async ({ pag
   const saveBounds = await page.getByRole('button', { name: 'Save application settings', exact: true }).boundingBox()
   const lastField = await page.getByLabel('Audit retention (days)', { exact: true }).boundingBox()
   expect(saveBounds!.y).toBeGreaterThan(lastField!.y + lastField!.height)
-  await expect(page.getByLabel('Voice channel')).toHaveCount(0)
+  await expect(page.getByLabel('Voice channel')).toHaveCount(1)
   await page.getByLabel('Maximum import size (MB)', { exact: true }).fill('750.5')
   await page.getByLabel('Total media storage limit (GB)', { exact: true }).fill('20.25')
   const saved = page.waitForRequest(request => request.url().endsWith('/api/settings/app') && request.method() === 'PUT')
@@ -173,7 +174,7 @@ test('collection sorts newest first, caps pages at fifty and removes redownload'
   })
   await page.goto('/videos')
   await expect(page.locator('.video-card')).toHaveCount(50)
-  await expect(page.getByLabel('Voice channel')).toHaveCount(0)
+  await expect(page.getByLabel('Voice channel')).toHaveCount(1)
   const gridBounds = await page.locator('.video-grid').boundingBox()
   const pageBounds = await page.getByRole('navigation', { name: 'Video collection pages' }).boundingBox()
   expect(pageBounds!.y).toBeGreaterThanOrEqual(gridBounds!.y + gridBounds!.height)
@@ -201,9 +202,8 @@ test('emoji picker has more categories and pages without internal scrolling', as
   for (const selector of ['.emoji-grid', '.emoji-categories']) {
     expect(await picker.locator(selector).evaluate(element => element.scrollWidth <= element.clientWidth && element.scrollHeight <= element.clientHeight)).toBeTruthy()
   }
-  const rail = await picker.getByRole('navigation', { name: 'Emoji categories' }).boundingBox()
-  const grid = await picker.locator('.emoji-grid').boundingBox()
-  expect(rail!.x + rail!.width).toBeLessThanOrEqual(grid!.x)
+  const columns = await picker.evaluate(element => ({ railRight: element.querySelector('.emoji-categories')!.getBoundingClientRect().right, gridLeft: element.querySelector('.emoji-grid')!.getBoundingClientRect().left }))
+  expect(columns.railRight).toBeLessThanOrEqual(columns.gridLeft)
   const bounds = await picker.boundingBox()
   expect(bounds!.x).toBeGreaterThanOrEqual(0)
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width)
@@ -232,7 +232,7 @@ test('audit uses separate pages and result filters', async ({ page }) => {
     return route.fulfill({ json: { results, total: 100, next_cursor: older ? null : 51 } })
   })
   await page.goto('/audit')
-  await expect(page.getByLabel('Voice channel')).toHaveCount(0)
+  await expect(page.getByLabel('Voice channel')).toHaveCount(1)
   await expect(page.locator('.audit-entry')).toHaveCount(50)
   const pages = page.getByRole('navigation', { name: 'Audit log pages' })
   await pages.getByRole('button', { name: 'Next' }).click()
@@ -296,8 +296,8 @@ test('audit only offers real details and date filters have clickable calendar co
     const date = await day.getAttribute('aria-label')
     expect(await day.evaluate(element => getComputedStyle(element).cursor)).toBe('pointer')
     await day.click()
-    await calendar.getByLabel('Hour', { exact: true }).selectOption('12')
-    await calendar.getByLabel('Minute', { exact: true }).selectOption('30')
+    await selectOption(calendar.getByLabel('Hour', { exact: true }), '12')
+    await selectOption(calendar.getByLabel('Minute', { exact: true }), '30')
     await calendar.getByRole('button', { name: 'Done', exact: true }).click()
     const key = label === 'From' ? 'after' : 'until'
     await expect.poll(() => new URLSearchParams(queries.at(-1)).get(key)).toBe(String(new Date(`${date}T12:30`).getTime() / 1000))
@@ -305,21 +305,27 @@ test('audit only offers real details and date filters have clickable calendar co
 })
 
 
-test('audit leaderboard and playback graph default to today and support periods and ranking', async ({ page }) => {
+test('Hall of shame leaderboard and playback graph default to today and support periods and ranking', async ({ page }) => {
   const queries: URLSearchParams[] = []
   let releaseRanking: () => void = () => {}
   const rankingResponse = new Promise<void>(resolve => { releaseRanking = resolve })
   await page.route('**/api/audit/activity?*', async route => {
     const params = new URL(route.request().url()).searchParams
     queries.push(params)
-    if (params.get('sort') === 'created' && queries.length === 2) await rankingResponse
+    if (params.get('sort') === 'created' && queries.length === 3) await rankingResponse
     const step = Number(params.get('bucket_seconds'))
     const after = Number(params.get('after'))
     const count = step === 3600 ? 24 : 7
     return route.fulfill({ json: { leaderboard: [{ user_id: '100', name: 'Player', avatar: null, created: 1, played: 4 }, { user_id: '200', name: 'Creator', avatar: null, created: 3, played: 1 }], series: Array.from({ length: count }, (_, index) => ({ timestamp: after + index * step, played: index === 0 ? 5 : 0 })), total_played: 5 } })
   })
-  await page.goto('/audit')
-  await expect(page.getByRole('combobox', { name: 'Activity period' })).toHaveValue('1')
+  await page.route('**/api/audit/leaderboard?*', async route => {
+    const params = new URL(route.request().url()).searchParams
+    queries.push(params)
+    if (params.get('sort') === 'created') await rankingResponse
+    await route.fulfill({ json: { leaderboard: [{ user_id: '100', name: 'Player', avatar: null, created: 1, played: 4 }, { user_id: '200', name: 'Creator', avatar: null, created: 3, played: 1 }] } })
+  })
+  await page.goto('/hall-of-shame')
+  await expect(page.getByRole('button', { name: 'Activity period' })).toContainText('Today')
   const table = page.getByRole('table', { name: 'Sound leaderboard' })
   await expect(table.locator('tbody tr').first()).toContainText('Player')
   await expect(page.locator('.chart-bar')).toHaveCount(24)
@@ -327,7 +333,7 @@ test('audit leaderboard and playback graph default to today and support periods 
   await page.locator('.chart-bar').first().click()
   await expect(page.locator('.chart-tooltip').first()).toBeVisible()
   await page.getByRole('button', { name: 'Most created', exact: true }).click()
-  await expect.poll(() => queries.length).toBe(2)
+  await expect.poll(() => queries.length).toBe(3)
   await expect(table.locator('tbody tr').first()).toContainText('Creator')
   await expect(table.locator('tbody tr')).toHaveCount(2)
   await expect(page.locator('.chart-bar')).toHaveCount(24)
@@ -339,11 +345,15 @@ test('audit leaderboard and playback graph default to today and support periods 
   await page.getByRole('button', { name: 'Most created', exact: true }).click()
   await expect(table.locator('tbody tr').first()).toContainText('Creator')
   await expect(page.locator('.activity-stats')).toHaveAttribute('aria-busy', 'false')
-  expect(queries).toHaveLength(2)
-  await page.getByRole('combobox', { name: 'Activity period' }).selectOption('7')
+  expect(queries).toHaveLength(3)
+  await selectOption(page.getByRole('button', { name: 'Activity period' }), '7')
   await expect(page.locator('.chart-bar')).toHaveCount(7)
   expect(queries.at(-1)!.get('bucket_seconds')).toBe('86400')
-  expect(queries.at(-1)!.get('sort')).toBe('created')
-  await expect(page.getByRole('list', { name: 'Activity entries' })).toBeVisible()
+  expect(queries.at(-1)!.has('sort')).toBe(false)
+  await expect(page.getByRole('list', { name: 'Activity entries' })).toHaveCount(0)
+  await page.reload()
+  await expect(page.getByRole('heading', { name: 'All-time sound leaderboard' })).toBeVisible()
+  await page.getByRole('button', { name: 'Audit log', exact: true }).click()
+  await expect(page.getByRole('table', { name: 'Sound leaderboard' })).toHaveCount(0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width)
 })

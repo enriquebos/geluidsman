@@ -39,7 +39,7 @@ services:
     restart: unless-stopped
     init: true
     cpus: 4
-    mem_limit: 6g
+    mem_limit: 12g
     gpus: all
     environment:
       TRANSCRIPTION_DEVICE: cuda

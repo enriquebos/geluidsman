@@ -8,6 +8,7 @@ type PermissionUser = { id: string; username: string; display_name: string; avat
 const descriptions: Record<string, string> = {
   admin: 'Access the application console, settings and user permissions. Other permissions remain independent.',
   high_volume: 'Set sound volume above 300%, up to 1000%.',
+  play_outside_voice: 'Play sounds when not in the bot’s current voice channel. Play sounds permission is also required.',
   play_sounds: 'Play sounds from the soundboard in the Discord voice channel.',
   stop_sounds: 'Stop individual sounds or stop all active playback.',
   connect_voice: 'Connect the bot to a voice channel or move it to another channel.',
@@ -23,6 +24,8 @@ const descriptions: Record<string, string> = {
   import_channels: 'Import videos from a supported YouTube channel.',
   manage_imports: 'Pause or dismiss import jobs. Retry and resume also require the relevant import permission.',
   delete_videos: 'Remove videos from the shared library.',
+  view_actions: 'Access shared Discord voice action triggers. Off by default.',
+  manage_actions: 'Create, edit and toggle shared action triggers. Delete your own triggers.',
   view_conversations: 'Access the Conversation page, transcripts and shared triggers. Off by default.',
   control_recording: 'Enable or disable automatic conversation recording.',
   manage_triggers: 'Create, edit and toggle any sound trigger. Delete your own triggers.',

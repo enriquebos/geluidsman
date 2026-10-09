@@ -217,3 +217,83 @@ def test_disconnect_cancels_connection_without_deadline(tmp_path: Path) -> None:
         db.close()
 
     asyncio.run(scenario())
+
+
+def test_guild_directory_paginates_excludes_bots_and_shares_cache(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "directory.sqlite3")
+        bot = Bot(Settings(_env_file=None, data_dir=tmp_path), db, Events())
+        page = [
+            {"user": {"id": str(index), "username": f"Person {index}", "bot": index == 1}} for index in range(1, 1001)
+        ]
+        bot.client.is_ready = Mock(return_value=True)
+        bot.client.http.get_members = AsyncMock(
+            side_effect=[page, [{"user": {"id": "1001", "username": "Guest"}, "nick": "Guest nickname"}]]
+        )
+        first, second = await asyncio.gather(bot.guild_members(), bot.guild_members())
+        assert first == second
+        assert len(first) == 1000
+        assert not any(member["id"] == "1" for member in first)
+        assert any(member["name"] == "Guest nickname" for member in first)
+        assert bot.client.http.get_members.await_count == 2
+        assert bot.client.http.get_members.call_args.kwargs["after"] == 1000
+        await bot.guild_members()
+        assert bot.client.http.get_members.await_count == 2
+        db.close()
+
+    asyncio.run(scenario())
+
+
+def test_status_connected_users_excludes_bots(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "participants.sqlite3")
+        bot = Bot(Settings(_env_file=None, data_dir=tmp_path), db, Events())
+        human = Mock(id=100, bot=False, display_name="Human", display_avatar=Mock(url="avatar"))
+        robot = Mock(id=200, bot=True, display_name="Robot")
+        voice = Mock(is_connected=Mock(return_value=True))
+        voice.channel.members = [human, robot]
+        bot.client.get_guild = Mock(return_value=Mock(voice_client=voice))
+        assert bot.status()["participants"] == [{"id": "100", "name": "Human", "avatar": "avatar"}]
+        db.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("present", [True, False])
+def test_startup_recovers_only_discord_reported_voice_once(tmp_path: Path, *, present: bool) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "startup.sqlite3")
+        bot = Bot(Settings(_env_file=None, discord_token=SecretStr(""), data_dir=tmp_path), db, Events())
+        voice_state = Mock(channel=Mock(id=123), self_mute=True, self_deaf=True, deaf=False) if present else None
+        guild = Mock(voice_client=None, me=Mock(voice=voice_state))
+        bot.client.get_guild = lambda _: guild
+        bot.state.connect = AsyncMock()
+        db.set_setting(f"guild:{bot.settings.discord_guild_id}:selected_channel_id", "456")
+        await bot.recover_startup_voice()
+        await bot.recover_startup_voice()
+        if present:
+            bot.state.connect.assert_awaited_once_with("123")
+            assert bot.state.muted
+            assert bot.state.deafened
+        else:
+            bot.state.connect.assert_not_awaited()
+        await bot.close()
+        db.close()
+
+    asyncio.run(scenario())
+
+
+def test_gateway_disconnect_cleans_voice_and_retains_network_recovery_target(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "gateway.sqlite3")
+        bot = Bot(Settings(_env_file=None, discord_token=SecretStr(""), data_dir=tmp_path), db, Events())
+        bot.state.desired_channel_id = "123"
+        bot.state.disconnect_unlocked = AsyncMock()
+        await bot.client.on_disconnect()
+        bot.state.disconnect_unlocked.assert_awaited_once()
+        assert bot.state.desired_channel_id == "123"
+        await bot.close()
+        assert bot.state.desired_channel_id is None
+        db.close()
+
+    asyncio.run(scenario())

@@ -15,7 +15,7 @@ export type State = {
   emojis?: ServerEmoji[]; user: User; guilds: {id: string; name: string}[];
   sources: Source[]; clips: Clip[]; jobs: Job[]; channel_imports: { id: string; url: string; title: string; status: string; error: string | null; total: number; counts: Record<string, number>; current: { title: string; url: string } | null }[];
   channels: { id: string; name: string; category: string | null }[];
-  status: { snapshot_at?: number; muted: boolean; deafened: boolean; configured: boolean; bot_ready: boolean; connected: boolean; channel_id: string | null; channel_name: string | null; selected_channel_id: string | null; master_volume: number; max_playbacks: number; playbacks: Playback[]; error: string | null };
+  status: { participants?: { id: string; name: string; avatar: string | null }[]; snapshot_at?: number; muted: boolean; deafened: boolean; configured: boolean; bot_ready: boolean; connected: boolean; channel_id: string | null; channel_name: string | null; selected_channel_id: string | null; master_volume: number; max_playbacks: number; playbacks: Playback[]; error: string | null };
   limits: { max_clip_seconds: number; max_source_seconds: number; max_storage_bytes: number; used_bytes: number };
   missing_dependencies: string[];
 }

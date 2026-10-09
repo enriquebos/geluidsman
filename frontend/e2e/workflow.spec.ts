@@ -1,3 +1,4 @@
+import { selectOption } from './select-option'
 import { expect, test } from '@playwright/test'
 
 test('video preview, precision trim, clip persistence, edit and delete', async ({ page, request }, testInfo) => {
@@ -131,11 +132,11 @@ test('caption search filters, synchronized seek and clip extraction', async ({ p
   page.on('pageerror', error => errors.push(error.message))
   await page.goto('/')
   await page.getByRole('button', { name: 'Video library' }).click()
-  await page.getByLabel('Caption language').selectOption('nl')
+  await selectOption(page.getByLabel('Caption language'), 'nl')
   await page.getByLabel('Search captions').fill('wereld')
   await expect(page.locator('.caption-result')).toHaveCount(1)
   await expect(page.locator('.caption-result mark')).toHaveText('wereld')
-  await page.getByLabel('Caption language').selectOption('en')
+  await selectOption(page.getByLabel('Caption language'), 'en')
   await expect(page.locator('.caption-result mark')).toHaveText('world')
   await page.getByLabel('Search captions').fill('no matching gibberish')
   await expect(page.getByText('No matching captions.', { exact: false })).toBeVisible()
@@ -172,8 +173,10 @@ test('move selection preserves length and handles fit inside waveform margins', 
     await route.fulfill({ response, json: state })
   })
   await page.goto('/')
-  await expect(page.getByLabel('Voice channel').locator('option').last()).toHaveText('The voice room')
-  expect(await page.getByLabel('Voice channel').evaluate(element => getComputedStyle(element).paddingRight)).toBe('38px')
+  await page.getByLabel('Voice channel').click()
+  await expect(page.getByRole('option', { name: 'The voice room', exact: true })).toBeVisible()
+  await page.getByRole('option', { name: 'The voice room', exact: true }).press('Escape')
+  expect(parseFloat(await page.getByLabel('Voice channel').evaluate(element => getComputedStyle(element).paddingRight))).toBeGreaterThanOrEqual(18)
   await page.getByRole('button', { name: 'Video library' }).click()
   await page.getByRole('button', { name: 'Watch & cut' }).first().click()
   await expect(page.getByTestId('trim-start')).toBeVisible()

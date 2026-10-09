@@ -1,3 +1,4 @@
+import { selectOption } from './select-option'
 import { test, expect } from '@playwright/test'
 
 test('live conversation chat alignment and personal triggers', async ({ page, request }, testInfo) => {
@@ -27,9 +28,11 @@ test('live conversation chat alignment and personal triggers', async ({ page, re
   await dialog.getByRole('button', { name: 'Trigger sound', exact: true }).click()
   await dialog.getByRole('textbox', { name: 'Search trigger sound' }).fill(name)
   await dialog.getByRole('option', { name: new RegExp(name) }).click()
-  await dialog.getByLabel('Match mode').selectOption('contains')
-  await dialog.getByLabel('Speakers', { exact: true }).selectOption('selected')
-  await dialog.getByRole('checkbox', { name: 'Other Member' }).check()
+  await selectOption(dialog.getByLabel('Match mode'), 'contains')
+  await selectOption(dialog.getByLabel('Speakers', { exact: true }), 'selected')
+  await dialog.getByRole('button', { name: 'Select speakers', exact: true }).click()
+  await dialog.getByRole('checkbox', { name: 'Other Member', exact: true }).check()
+  await page.keyboard.press('Escape')
   await dialog.getByLabel('Cooldown (seconds)').fill('0')
   await dialog.getByRole('button', { name: 'Save trigger' }).click()
   await expect(dialog).toHaveCount(0)
@@ -69,7 +72,7 @@ test('live transcripts preserve reading position, load older messages and offer 
   await page.goto('/conversation')
   const transcript = page.getByRole('log', { name: 'Conversation transcript' })
   await expect(transcript.locator('article')).toHaveCount(100)
-  await expect(transcript.locator('em')).toHaveText('Raren geluiden')
+  await expect(transcript.locator('em')).toHaveText('*Raren geluiden*')
   await transcript.evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll', { bubbles: true })) })
   await page.getByRole('button', { name: 'Older messages' }).click()
   await expect(transcript).toContainText('Older speech')
@@ -96,13 +99,9 @@ test('trigger alternatives save, edit and survive reload', async ({ page, reques
     await expect(input).toBeFocused()
     await input.fill(word)
   }
-  await dialog.getByLabel('Trigger action').selectOption('stop_all')
-  const words = await dialog.locator('.trigger-words').boundingBox()
-  const options = await dialog.locator('.trigger-options').boundingBox()
-  if (testInfo.project.name === 'desktop') {
-    expect((await dialog.boundingBox())!.width).toBeGreaterThan(800)
-    expect(options!.x).toBeGreaterThanOrEqual(words!.x + words!.width)
-  } else expect(options!.y).toBeGreaterThanOrEqual(words!.y + words!.height)
+  await selectOption(dialog.getByLabel('Trigger action'), 'stop_all')
+  for (const name of ['When', 'Who', 'Then', 'Timing']) await expect(dialog.getByRole('heading', { name, exact: true })).toBeVisible()
+  if (testInfo.project.name === 'desktop') expect((await dialog.boundingBox())!.width).toBeGreaterThan(800)
   expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
   await dialog.getByRole('button', { name: 'Save trigger' }).click()
   await expect(dialog).not.toBeVisible()
@@ -122,6 +121,12 @@ test('trigger alternatives save, edit and survive reload', async ({ page, reques
   await expect(editor).not.toBeVisible()
   const saved = (await (await request.get('/api/conversation/triggers')).json()).items.find((trigger: { phrase: string }) => trigger.phrase.startsWith(first))
   expect(saved.phrases).toEqual([first, 'dag'])
+  await page.getByRole('button', { name: 'New trigger', exact: true }).click()
+  await dialog.getByLabel('Word or phrase 1', { exact: true }).fill('Another phrase')
+  await selectOption(dialog.getByLabel('Trigger action'), 'stop_all')
+  await expect(dialog.getByRole('alert')).toContainText('trigger already exists')
+  await expect(dialog.getByRole('button', { name: 'Save trigger' })).toBeDisabled()
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
   await request.delete(`/api/conversation/triggers/${saved.id}`)
 })
 

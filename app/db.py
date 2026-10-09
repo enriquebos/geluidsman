@@ -119,6 +119,24 @@ class Database:
             ),
         )
 
+        if (
+            actor_id
+            and outcome == "success"
+            and action in {"sound.create", "sound.play"}
+            and guild_id in {None, "1352422295402057759"}
+        ):
+            self.conn.execute(
+                "INSERT INTO activity_totals(actor_id,name,created,played) VALUES (?,?,?,?) "
+                "ON CONFLICT(actor_id) DO UPDATE SET name=excluded.name,"
+                "created=activity_totals.created+excluded.created,played=activity_totals.played+excluded.played",
+                (
+                    actor_id,
+                    actor["display_name"] if actor else "Unknown user",
+                    int(action == "sound.create"),
+                    int(action == "sound.play"),
+                ),
+            )
+
     def audit(
         self,
         actor_id: str | None,
@@ -134,11 +152,19 @@ class Database:
             self.insert_audit(actor_id, action, resource_id, name, outcome=outcome, guild_id=guild_id, details=details)
 
     def change(
-        self, sql: str, args: SQLParameters, actor_id: str | None, action: str, *, resource_id: str, name: str
+        self,
+        sql: str,
+        args: SQLParameters,
+        actor_id: str | None,
+        action: str,
+        *,
+        resource_id: str,
+        name: str,
+        details: JsonObject | None = None,
     ) -> None:
         with self.lock, self.conn:
             self.conn.execute(sql, args)
-            self.insert_audit(actor_id, action, resource_id, name)
+            self.insert_audit(actor_id, action, resource_id, name, details=details)
 
     def rows(self, sql: str, args: SQLParameters = ()) -> list[JsonObject]:
         with self.lock:
