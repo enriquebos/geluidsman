@@ -46,44 +46,74 @@ class ChannelImports:
         self.task = None
         self.batch_id = None
 
-    def update(self, batch_id: str, status: str, error: str | None = None) -> None:
-        self.media.db.execute("UPDATE channel_batches SET status=?,error=? WHERE id=?", (status, error, batch_id))
+    async def update(self, batch_id: str, status: str, error: str | None = None) -> None:
+        await self.media.db.run(
+            self.media.db.execute,
+            "UPDATE channel_batches SET status=?,error=? WHERE id=?",
+            (status, error, batch_id),
+        )
         if status in ("complete", "failed", "paused"):
-            batch = self.media.db.one("SELECT actor_id,title FROM channel_batches WHERE id=?", (batch_id,))
+            batch = await self.media.db.run(
+                self.media.db.one, "SELECT actor_id,title FROM channel_batches WHERE id=?", (batch_id,)
+            )
             if batch and batch["actor_id"]:
-                self.media.db.audit(batch["actor_id"], "channel.import", batch_id, batch["title"], outcome=status)
+                await self.media.db.run(
+                    self.media.db.audit,
+                    batch["actor_id"],
+                    "channel.import",
+                    batch_id,
+                    batch["title"],
+                    outcome=status,
+                )
         self.media.events.publish("jobs")
 
-    def start(self, url: str, actor_id: str | None = None) -> str:
+    async def start(self, url: str, actor_id: str | None = None) -> str:
         url = channel_url(url)
-        self.media.ensure_import_available()
-        batch_id = new_id()
-        self.media.db.execute(
-            "INSERT INTO channel_batches(id,url,title,status,error,created_at,actor_id) VALUES (?,?,?,?,?,?,?)",
-            (batch_id, url, "YouTube channel", "discovering", None, time.time(), actor_id),
-        )
-        self.media.db.audit(actor_id, "channel.import", batch_id, url, outcome="requested")
-        self.launch(batch_id)
-        return batch_id
+        await self.media.ensure_import_available()
+        try:
+            batch_id = new_id()
+            await self.media.db.run(
+                self.media.db.execute,
+                "INSERT INTO channel_batches(id,url,title,status,error,created_at,actor_id) VALUES (?,?,?,?,?,?,?)",
+                (batch_id, url, "YouTube channel", "discovering", None, time.time(), actor_id),
+            )
+            await self.media.db.run(self.media.db.audit, actor_id, "channel.import", batch_id, url, outcome="requested")
+            await self.launch(batch_id)
+        except BaseException:
+            self.media.busy = False
+            raise
+        else:
+            return batch_id
 
-    def resume(self, batch_id: str, actor_id: str | None = None) -> None:
-        self.media.ensure_import_available()
-        if actor_id:
-            self.media.db.execute("UPDATE channel_batches SET actor_id=? WHERE id=?", (actor_id, batch_id))
-        self.media.db.execute("UPDATE channel_batches SET dismissed=0 WHERE id=?", (batch_id,))
-        self.media.db.audit(actor_id, "channel.resume", batch_id)
-        self.media.db.execute(
-            "UPDATE channel_items SET status='queued' WHERE batch_id=? AND status IN ('failed','importing')",
-            (batch_id,),
-        )
-        self.launch(batch_id)
+    async def resume(self, batch_id: str, actor_id: str | None = None) -> None:
+        await self.media.ensure_import_available()
+        try:
+            if actor_id:
+                await self.media.db.run(
+                    self.media.db.execute, "UPDATE channel_batches SET actor_id=? WHERE id=?", (actor_id, batch_id)
+                )
+            await self.media.db.run(
+                self.media.db.execute, "UPDATE channel_batches SET dismissed=0 WHERE id=?", (batch_id,)
+            )
+            await self.media.db.run(self.media.db.audit, actor_id, "channel.resume", batch_id)
+            await self.media.db.run(
+                self.media.db.execute,
+                "UPDATE channel_items SET status='queued' WHERE batch_id=? AND status IN ('failed','importing')",
+                (batch_id,),
+            )
+            await self.launch(batch_id)
+        except BaseException:
+            self.media.busy = False
+            raise
 
-    def launch(self, batch_id: str) -> None:
+    async def launch(self, batch_id: str) -> None:
         self.media.busy = True
-        self.update(
+        await self.update(
             batch_id,
             "running"
-            if self.media.db.one("SELECT id FROM channel_items WHERE batch_id=?", (batch_id,))
+            if (
+                await self.media.db.run(self.media.db.one, "SELECT id FROM channel_items WHERE batch_id=?", (batch_id,))
+            )
             else "discovering",
         )
         self.batch_id = batch_id
@@ -96,11 +126,11 @@ class ChannelImports:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
             self.media.busy = False
-        self.update(batch_id, "paused")
+        await self.update(batch_id, "paused")
 
     async def discover(self, batch: dict) -> None:
         media = self.media
-        self.update(batch["id"], "discovering")
+        await self.update(batch["id"], "discovering")
         with (
             TemporaryDirectory(prefix="channel-", dir=media.root) as folder,
             DownloadProxy(
@@ -111,6 +141,10 @@ class ChannelImports:
             if proxy.block_reason:
                 message = proxy.block_reason
                 raise ValueError(message)
+        await media.db.run(self.save_discovery, batch, info)
+
+    def save_discovery(self, batch: dict, info: dict) -> None:
+        media = self.media
         with media.db.lock, media.db.conn:
             media.db.conn.execute("UPDATE channel_batches SET title=? WHERE id=?", (info["title"], batch["id"]))
             media.db.conn.executemany(
@@ -119,51 +153,63 @@ class ChannelImports:
             )
 
     async def run(self, batch_id: str) -> None:
-        operation_token = self.media.operation.set(self.media.settings)
+        operation_token = self.media.operation.set(await self.media.db.run(lambda: self.media.settings))
         try:
-            batch = self.media.db.one("SELECT * FROM channel_batches WHERE id=?", (batch_id,))
-            if not self.media.db.one("SELECT id FROM channel_items WHERE batch_id=?", (batch_id,)):
+            batch = await self.media.db.run(self.media.db.one, "SELECT * FROM channel_batches WHERE id=?", (batch_id,))
+            if not (
+                await self.media.db.run(self.media.db.one, "SELECT id FROM channel_items WHERE batch_id=?", (batch_id,))
+            ):
                 await self.discover(batch)
-            self.update(batch_id, "running")
+            await self.update(batch_id, "running")
             await self.import_items(batch_id)
         except asyncio.CancelledError:
-            self.media.db.execute(
-                "UPDATE channel_items SET status='queued' WHERE batch_id=? AND status='importing'", (batch_id,)
+            await self.media.db.run(
+                self.media.db.execute,
+                "UPDATE channel_items SET status='queued' WHERE batch_id=? AND status='importing'",
+                (batch_id,),
             )
-            self.update(batch_id, "paused")
+            await self.update(batch_id, "paused")
             raise
         except (ValueError, OSError, TimeoutError, *DATABASE_ERRORS) as error:
             message = str(error) if isinstance(error, ValueError) else "Channel import failed. Retry to continue."
-            self.update(batch_id, "failed", message)
+            await self.update(batch_id, "failed", message)
         finally:
             self.media.operation.reset(operation_token)
             self.media.busy = False
 
     async def import_items(self, batch_id: str) -> None:
         media = self.media
-        known = {video_id(item["url"]) for item in media.db.sources()}
-        items = media.db.rows(
-            "SELECT * FROM channel_items WHERE batch_id=? AND status='queued' ORDER BY id", (batch_id,)
+        known = {video_id(item["url"]) for item in (await media.db.run(media.db.sources))}
+        items = await media.db.run(
+            media.db.rows, "SELECT * FROM channel_items WHERE batch_id=? AND status='queued' ORDER BY id", (batch_id,)
         )
         for item in items:
             if video_id(item["url"]) in known:
-                media.db.execute("UPDATE channel_items SET status='skipped' WHERE id=?", (item["id"],))
+                await media.db.run(
+                    media.db.execute, "UPDATE channel_items SET status='skipped' WHERE id=?", (item["id"],)
+                )
                 media.events.publish("jobs")
                 continue
             if media.used_bytes() >= media.settings.max_storage_bytes:
-                self.update(batch_id, "paused", "Storage is full. Free space and resume this channel.")
+                await self.update(batch_id, "paused", "Storage is full. Free space and resume this channel.")
                 return
-            batch = media.db.one("SELECT actor_id FROM channel_batches WHERE id=?", (batch_id,))
-            job_id = media.db.add_job(item["url"], batch["actor_id"])
-            media.db.audit(batch["actor_id"], "video.import", job_id, item["title"], outcome="requested")
-            media.db.execute("UPDATE channel_items SET status='importing',job_id=? WHERE id=?", (job_id, item["id"]))
+            batch = await media.db.run(media.db.one, "SELECT actor_id FROM channel_batches WHERE id=?", (batch_id,))
+            job_id = await media.db.run(media.db.add_job, item["url"], batch["actor_id"])
+            await media.db.run(
+                media.db.audit, batch["actor_id"], "video.import", job_id, item["title"], outcome="requested"
+            )
+            await media.db.run(
+                media.db.execute,
+                "UPDATE channel_items SET status='importing',job_id=? WHERE id=?",
+                (job_id, item["id"]),
+            )
             media.events.publish("jobs")
             await media.import_job(job_id, item["url"])
             media.busy = True
-            job = media.db.one("SELECT status FROM jobs WHERE id=?", (job_id,))
+            job = await media.db.run(media.db.one, "SELECT status FROM jobs WHERE id=?", (job_id,))
             status = "complete" if job["status"] == "complete" else "failed"
-            media.db.execute("UPDATE channel_items SET status=? WHERE id=?", (status, item["id"]))
+            await media.db.run(media.db.execute, "UPDATE channel_items SET status=? WHERE id=?", (status, item["id"]))
             if status == "complete":
                 known.add(video_id(item["url"]))
             media.events.publish("jobs")
-        self.update(batch_id, "complete")
+        await self.update(batch_id, "complete")

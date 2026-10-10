@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from app.db import Database
-from app.permissions import DEFAULTS
+from app.permissions import DEFAULTS, effective_permissions
 from tests.test_auth import GUILD, headers, login
 from tests.test_auth import client as auth_fixture
 from tests.test_conversation import seed
@@ -330,3 +330,40 @@ def test_playback_requires_voice_presence_or_explicit_permission(
     assert state.play.call_count == int(status == 201)
     assert client.get("/api/auth/me").status_code == 200
     assert not DEFAULTS["play_outside_voice"]
+
+
+def test_channel_import_defaults_require_an_explicit_grant() -> None:
+    assert not DEFAULTS["import_channels"]
+    assert not effective_permissions({})["import_channels"]
+    assert effective_permissions({"import_channels": True})["import_channels"]
+    assert effective_permissions({}, admin=True)["import_channels"]
+
+
+def test_recording_control_default_and_inherited_override(client: TestClient) -> None:
+    admin = login(client)
+    client.app.state.auth.admin_ids.add("100")
+    add_user(client)
+    assert DEFAULTS["control_recording"] is False
+    override(client, {"control_recording": False}, "200")
+    member = client.get("/api/admin/users?q=Other").json()["users"][0]
+    assert member["permissions"]["control_recording"] is False
+    assert "control_recording" not in member["overrides"]
+    endpoint = "/api/admin/users/200/permissions"
+    granted = client.put(endpoint, json={"overrides": {"control_recording": True}}, headers=headers(admin))
+    assert granted.json()["overrides"] == {"control_recording": True}
+    denied = client.put(endpoint, json={"overrides": {"control_recording": False}}, headers=headers(admin))
+    assert denied.json()["overrides"] == {}
+    assert denied.json()["permissions"]["control_recording"] is False
+    assert (
+        json.loads(
+            client.app.state.db.one("SELECT permission_overrides FROM users WHERE id='200'")["permission_overrides"]
+        )
+        == {}
+    )
+
+
+def test_long_sound_permission_is_default_off() -> None:
+    assert DEFAULTS["long_sounds"] is False
+    assert effective_permissions({})["long_sounds"] is False
+    assert effective_permissions({"long_sounds": True})["long_sounds"] is True
+    assert effective_permissions({"long_sounds": False}, admin=True)["long_sounds"] is False

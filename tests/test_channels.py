@@ -97,7 +97,7 @@ def test_queue_skip_failure_continuation_and_retry(tmp_path: Path) -> None:
             patch.object(media, "download", new=AsyncMock(return_value={"title": "Kud", "videos": videos})),
             patch.object(media, "import_job", side_effect=import_video),
         ):
-            batch_id = media.channels.start("https://www.youtube.com/@KudNL/videos")
+            batch_id = await media.channels.start("https://www.youtube.com/@KudNL/videos")
             await media.channels.task
         batch = db.batches()[0]
         assert batch["counts"] == {"complete": 1, "failed": 1, "skipped": 1}
@@ -109,7 +109,7 @@ def test_queue_skip_failure_continuation_and_retry(tmp_path: Path) -> None:
             media.update_job(job_id, "complete")
 
         with patch.object(media, "import_job", side_effect=successful):
-            media.channels.resume(batch_id)
+            await media.channels.resume(batch_id)
             await media.channels.task
         assert db.batches()[0]["counts"] == {"complete": 2, "skipped": 1}
         db.close()
@@ -124,7 +124,7 @@ def test_pause_cleanup_and_restart_queue_recovery(tmp_path: Path) -> None:
         db = Database(path)
         media = Media(settings, db, Events())
         with patch.object(media, "download", new=AsyncMock()):
-            batch_id = media.channels.start("https://www.youtube.com/@KudNL/videos")
+            batch_id = await media.channels.start("https://www.youtube.com/@KudNL/videos")
             await media.channels.pause(batch_id)
         assert not media.busy
         assert db.batches()[0]["status"] == "paused"

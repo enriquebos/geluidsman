@@ -197,11 +197,14 @@ def test_recording_independence_stop_all_leave_and_cancellation(tmp_path: Path) 
     asyncio.run(scenario())
 
 
-def test_api_default_denial_grants_validation_and_ownership(client: TestClient) -> None:
+def test_api_default_access_denial_grants_validation_and_ownership(client: TestClient) -> None:
     user = login(client)
     db = client.app.state.db
     seed(db)
-    assert not user["permissions"]["view_actions"]
+    assert user["permissions"]["view_actions"]
+    assert client.get("/api/actions/status").status_code == 200
+    assert client.get("/api/actions/triggers").status_code == 200
+    db.execute("UPDATE users SET permission_overrides=? WHERE id=?", ('{"view_actions":false}', "100"))
     assert user["permissions"]["manage_actions"]
     for path in ("/api/actions/status", "/api/actions/triggers"):
         assert client.get(path).status_code == 403
@@ -476,3 +479,64 @@ def test_conversation_and_action_receivers_handover_without_duplicate_events(tmp
         value.db.close()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("target", "enabled"), [("selected", 1), ("self", 1), ("selected", 0)])
+def test_specific_actions_override_everyone_only_for_matching_users(tmp_path: Path, target: str, enabled: int) -> None:
+    async def scenario() -> None:
+        value = engine(tmp_path)
+        value.bot.voice.channel.members.append(SimpleNamespace(id=200, bot=False))
+        rule(value, id="everyone", cooldown=0)
+        rule(value, id="specific", target=target, speakers='["100"]', enabled=enabled, cooldown=30)
+        rule(value, id="different-event", event="mute_on", target="selected", speakers='["200"]')
+        await value.match(event(value))
+        await asyncio.gather(*value.pending)
+        fired = value.db.rows("SELECT resource_id FROM audit WHERE action='action_trigger.fire' AND outcome='success'")
+        assert [row["resource_id"] for row in fired] == ["specific" if enabled else "everyone"]
+        if enabled:
+            await value.match(event(value))
+            await asyncio.gather(*value.pending)
+            assert value.bot.state.play.call_count == 1
+            assert "everyone" not in value.cooldowns
+        await value.match(event(value, "200"))
+        await asyncio.gather(*value.pending)
+        assert value.bot.state.play.call_count == 2
+        await value.close()
+        value.db.close()
+
+    asyncio.run(scenario())
+
+
+def test_delayed_everyone_action_rechecks_specific_override(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        value = engine(tmp_path)
+        saved = rule(value, delay=0.05)
+        task = asyncio.create_task(value.run(saved, event(value)))
+        await asyncio.sleep(0.01)
+        rule(value, id="specific", target="selected", speakers='["100"]')
+        await task
+        value.bot.state.play.assert_not_called()
+        audit = value.db.one("SELECT details FROM audit WHERE action='action_trigger.fire'")
+        assert "user-specific" in json.loads(audit["details"])["reason"]
+        await value.close()
+        value.db.close()
+
+    asyncio.run(scenario())
+
+
+def test_action_drops_report_coalesced_console_warnings(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    value = engine(tmp_path)
+    value.report_drops()
+    assert not caplog.records
+    value.dropped = 3
+    value.report_drops()
+    value.report_drops()
+    value.dropped = 5
+    value.report_drops()
+    records = [record for record in caplog.records if record.name == "app.actions"]
+    assert len(records) == 2
+    assert records[0].levelname == "WARNING"
+    assert "Dropped 3 actions" in records[0].message
+    assert "Dropped 2 actions" in records[1].message
+    assert all(record.exc_info is None for record in records)
+    value.db.close()

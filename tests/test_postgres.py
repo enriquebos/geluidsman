@@ -97,6 +97,15 @@ def test_postgres_api(database: Database, tmp_path: Path) -> None:
         )
         app.state.conversation.session = app.state.db.one("SELECT * FROM conversations WHERE id='session'")
         assert client.get("/api/conversations/session/messages").json()["items"][0]["text"] == "Hallo"
+        app.state.db.execute(
+            "INSERT INTO conversation_messages(id,session_id,speaker_id,speaker_name,started_at,"
+            "ended_at,text,language) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("late", "session", "200", "Member", time.time() - 10, time.time() - 9, "Later result", "nl"),
+        )
+        delta = client.get("/api/conversations/session/messages?after=message").json()
+        assert [item["id"] for item in delta["items"]] == ["late"]
+        assert delta["has_new"] is False
         assert client.put("/api/conversations/recording", json={"enabled": False}).status_code == 200
         assert not app.state.db.rows("SELECT * FROM conversation_messages")
         app.state.db.audit("100", "sound.play")

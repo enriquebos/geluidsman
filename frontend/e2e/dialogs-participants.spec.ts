@@ -56,3 +56,30 @@ test('Escape closes sound edits from a text input and delete confirmations', asy
   await expect(confirmation).not.toBeVisible()
   await request.delete(`/api/clips/${clip.id}`, { headers: { 'X-CSRF-Token': 'fixture-csrf' } })
 })
+
+
+test('recording permission disables the themed switch without changing its current value', async ({ page, request }) => {
+  for (const endpoint of ['/api/auth/me', '/api/state']) {
+    const data = await (await request.get(endpoint)).json()
+    const user = endpoint.endsWith('/me') ? data : data.user
+    user.permissions.control_recording = false
+    await page.route(`**${endpoint}`, route => route.fulfill({ json: data }))
+  }
+  await page.route('**/api/conversations/status', route => route.fulfill({ json: { enabled: true, recording: true, session: null, participants: [], backlog: 0, dropped: 0, error: null } }))
+  await page.goto('/conversation')
+  const toggle = page.getByRole('switch', { name: 'Recording enabled' })
+  await expect(toggle).toBeDisabled()
+  await expect(toggle).toBeChecked()
+})
+
+test('caption language uses a compact half-width selector', async ({ page }) => {
+  await page.goto('/videos')
+  const language = page.getByRole('button', { name: 'Caption language' })
+  await expect(language).toBeVisible()
+  const width = (await language.boundingBox())!.width
+  const heading = (await page.locator('.caption-heading').boundingBox())!.width
+  expect(width).toBeLessThanOrEqual(heading / 2 + 1)
+  expect(width).toBeLessThanOrEqual(240)
+  await language.click()
+  await expect(page.getByRole('option', { name: 'Dutch', exact: true })).toBeVisible()
+})

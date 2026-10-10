@@ -59,7 +59,7 @@ test('scrolling up pauses console following while new logs arrive', async ({ pag
 
 test('conversation has connection controls and defaults to persistent Dutch transcription', async ({ page }) => {
   await page.goto('/conversation')
-  await expect(page.getByText('Connect to Discord', { exact: true })).toBeVisible()
+  await expect(page.getByText('Disconnected', { exact: true })).toBeVisible()
   await expect(page.getByLabel('Voice channel')).toBeVisible()
   const language = page.getByLabel('Conversation language')
   await expect(language).toContainText('Dutch')

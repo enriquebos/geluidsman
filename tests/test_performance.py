@@ -13,6 +13,7 @@ from app.config import Settings
 from app.db import Database
 from app.events import Events
 from app.media import Media, MediaError
+from app.storage import Storage
 from tests.test_auth import client as auth_fixture
 from tests.test_auth import login
 
@@ -74,6 +75,9 @@ def test_media_summary_coalesces_off_thread_and_limits_remain_fresh(tmp_path: Pa
         assert len(thread_ids) == 1
         assert thread_ids[0] != threading.get_ident()
         (media.root / "added").write_bytes(bytes(100))
+        assert media.used_bytes() == 0
+        media.storage.next_scan = 0
+        await media.reconcile_storage()
         assert media.used_bytes() == 100
         assert (await media.summary())["used_bytes"] == 0
         media.summary_until = 0
@@ -182,3 +186,119 @@ def test_events_retry_temporary_auth_failure_without_logout(monkeypatch: pytest.
         assert not events.clients
 
     asyncio.run(check())
+
+
+def test_database_workers_are_bounded_and_leave_event_loop_responsive(tmp_path: Path) -> None:
+    db = Database(tmp_path / "workers.sqlite3")
+    guard = threading.Lock()
+    started = threading.Event()
+    release = threading.Event()
+    active = 0
+    peak = 0
+    identities = set()
+
+    def work() -> int:
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+            identities.add(threading.get_ident())
+            if active == 4:
+                started.set()
+        release.wait(2)
+        with guard:
+            active -= 1
+        return 1
+
+    async def check() -> None:
+        jobs = [asyncio.create_task(db.run(work)) for _ in range(12)]
+        try:
+            async with asyncio.timeout(2):
+                assert await asyncio.to_thread(started.wait, 1)
+            assert not any(job.done() for job in jobs)
+            assert threading.get_ident() not in identities
+            assert peak == 4
+        finally:
+            release.set()
+            assert sum(await asyncio.gather(*jobs)) == 12
+        assert peak == 4
+
+    asyncio.run(check())
+    db.close()
+
+
+def test_storage_tracks_revisions_without_repeated_scans(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    first = tmp_path / "old"
+    first.mkdir()
+    (first / "audio").write_bytes(bytes(100))
+    storage = Storage(tmp_path)
+    scan = Mock(side_effect=AssertionError("Unexpected full scan"))
+    monkeypatch.setattr(storage, "reconcile", scan)
+    assert all(storage.used() == 100 for _ in range(100))
+    stage = tmp_path / "new"
+    stage.mkdir()
+    (stage / "audio").write_bytes(bytes(80))
+    assert storage.projected(stage) == 180
+    assert storage.used() == 100
+    storage.commit(stage)
+    assert storage.used() == 180
+    storage.remove(first)
+    assert storage.used() == 80
+    failed = tmp_path / "failed"
+    failed.mkdir()
+    (failed / "audio").write_bytes(bytes(200))
+    assert storage.projected(failed) == 280
+    storage.remove(failed)
+    assert storage.used() == 80
+    scan.assert_not_called()
+
+
+def test_media_commit_finishes_before_shutdown_cancellation(tmp_path: Path) -> None:
+    db = Database(tmp_path / "commit.sqlite3")
+    media = Media(Settings(_env_file=None, data_dir=tmp_path), db, Events())
+    folder = media.root / "sound"
+    folder.mkdir()
+    (folder / "sound.wav").write_bytes(bytes(120))
+    started = threading.Event()
+    release = threading.Event()
+
+    def save() -> None:
+        started.set()
+        release.wait(2)
+        db.set_setting("committed", value=True)
+
+    async def check() -> None:
+        task = asyncio.create_task(media.commit_media(folder, save))
+        async with asyncio.timeout(2):
+            assert await asyncio.to_thread(started.wait, 1)
+        task.cancel()
+        release.set()
+        await task
+        assert db.setting("committed") is True
+        assert folder.exists()
+        assert media.used_bytes() == 120
+
+    asyncio.run(check())
+    db.close()
+
+
+def test_import_reservation_rejects_competing_starts_and_releases_failed_start(tmp_path: Path) -> None:
+    db = Database(tmp_path / "reservation.sqlite3")
+    media = Media(Settings(_env_file=None, data_dir=tmp_path), db, Events())
+    media.dependencies = Mock(return_value=[])
+
+    async def check() -> None:
+        attempts = await asyncio.gather(
+            media.ensure_import_available(), media.ensure_import_available(), return_exceptions=True
+        )
+        assert sum(isinstance(value, MediaError) for value in attempts) == 1
+        assert media.busy is True
+        media.busy = False
+        db.add_job = Mock(side_effect=RuntimeError("Database unavailable"))
+        with pytest.raises(RuntimeError, match="Database unavailable"):
+            await media.import_url("https://example.com/video")
+        assert media.busy is False
+        assert not media.tasks
+
+    asyncio.run(check())
+    db.close()

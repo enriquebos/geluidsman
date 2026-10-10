@@ -125,6 +125,7 @@ def test_import_validation_busy_limits_and_retry(client: TestClient) -> None:
     folder = media.root / "source"
     folder.mkdir()
     (folder / "test").write_bytes(b"ab")
+    media.storage.commit(folder)
     assert client.post(f"/api/imports/{job}/retry").status_code == 400
 
 

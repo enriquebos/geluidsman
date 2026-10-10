@@ -52,3 +52,27 @@ test('caption search finds short prefixes and typos, highlighting speech', async
   await expect(page).toHaveURL(/\/videos\/fixture\/cut/)
   await expect(page.getByRole('heading', { name: 'Cut a new sound' })).toBeVisible()
 })
+
+
+test('long sound permission changes the upload limits', async ({ page }) => {
+  let allowed = false
+  await page.route('**/api/auth/me', async route => {
+    const user = await (await route.fetch()).json()
+    user.permissions.long_sounds = allowed
+    await route.fulfill({ json: user })
+  })
+  await page.route('**/api/state', async route => {
+    const state = await (await route.fetch()).json()
+    state.user.permissions.long_sounds = allowed
+    await route.fulfill({ json: state })
+  })
+  for (const grant of [false, true]) {
+    allowed = grant
+    await page.goto('/soundboard')
+    await page.getByRole('button', { name: 'Add a sound', exact: true }).click()
+    const modal = page.getByRole('dialog', { name: 'Add a sound', exact: true })
+    await expect(modal.locator('.audio-dropzone small')).toHaveText(grant ? 'Up to 100 MB · 0.1–600 seconds' : 'Up to 20 MB · 0.1–60 seconds')
+    await page.keyboard.press('Escape')
+    await expect(modal).not.toBeVisible()
+  }
+})

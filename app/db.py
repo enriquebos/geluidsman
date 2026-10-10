@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import threading
 import time
 import uuid
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ParamSpec, TypeVar
 
+import anyio
 import psycopg
 
 from app.caption_matching import caption_match, search_tokens
@@ -15,7 +18,13 @@ from app.import_errors import import_guidance
 from app.postgres import Connection
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from app.types import JsonObject, JsonValue, SQLParameters
+
+
+WorkArgs = ParamSpec("WorkArgs")
+WorkResult = TypeVar("WorkResult")
 
 
 DATABASE_ERRORS = (sqlite3.Error, psycopg.Error)
@@ -27,6 +36,7 @@ def new_id() -> str:
 
 class Database:
     def __init__(self, path: Path, url: str = "") -> None:
+        self.worker_limit = anyio.CapacityLimiter(4)
         if url:
             self.lock = threading.RLock()
             self.conn = Connection(url)
@@ -39,6 +49,10 @@ class Database:
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         with self.conn:
+            message_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(conversation_messages)")}
+            if message_columns and "received_order" not in message_columns:
+                self.conn.execute("ALTER TABLE conversation_messages ADD COLUMN received_order INTEGER")
+                self.conn.execute("UPDATE conversation_messages SET received_order=rowid")
             self.conn.executescript(Path(__file__).with_name("schema_sqlite.sql").read_text(encoding="utf-8"))
             columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(conversation_triggers)")}
             for name, definition in (
@@ -48,6 +62,18 @@ class Database:
                 if name not in columns:
                     self.conn.execute(f"ALTER TABLE conversation_triggers ADD COLUMN {name} {definition}")
             self.recover_jobs()
+
+    async def run(
+        self, function: Callable[WorkArgs, WorkResult], *args: WorkArgs.args, **kwargs: WorkArgs.kwargs
+    ) -> WorkResult:
+        task = asyncio.create_task(
+            anyio.to_thread.run_sync(partial(function, *args, **kwargs), limiter=self.worker_limit)
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
 
     def recover_jobs(self) -> None:
         for job in self.rows("SELECT * FROM jobs WHERE status IN ('queued','downloading','processing')"):
@@ -213,14 +239,17 @@ class Database:
                     "INSERT INTO caption_tracks VALUES (?,?,?,?,?,?)",
                     (track_id, source_id, track["language"], track["kind"], track["status"], track.get("error")),
                 )
-                for cue in track.get("cues", []):
-                    cursor = self.conn.execute(
-                        "INSERT INTO caption_cues (track_id,start,end,text,words) VALUES (?,?,?,?,?)",
-                        (track_id, cue["start"], cue["end"], cue["text"], json.dumps(cue["words"])),
-                    )
-                    self.conn.execute(
-                        "INSERT INTO caption_search(rowid,text) VALUES (?,?)", (cursor.lastrowid, cue["text"])
-                    )
+                self.conn.executemany(
+                    "INSERT INTO caption_cues (track_id,start,end,text,words) VALUES (?,?,?,?,?)",
+                    [
+                        (track_id, cue["start"], cue["end"], cue["text"], json.dumps(cue["words"]))
+                        for cue in track.get("cues", [])
+                    ],
+                )
+                self.conn.execute(
+                    "INSERT INTO caption_search(rowid,text) SELECT id,text FROM caption_cues WHERE track_id=?",
+                    (track_id,),
+                )
             if actor_id:
                 self.insert_audit(actor_id, "video.saved", source_id, source["title"])
 

@@ -115,7 +115,7 @@ test('restricted users retain previews and favourites, get ownership controls an
     await expect(other.getByRole('button', { name: 'Edit Other permission sound', exact: true })).toHaveCount(0)
     await expect(page.locator('.card-play-trigger')).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Stop all', exact: true })).toHaveCount(0)
-    await expect(page.getByLabel('Master volume')).toHaveCount(0)
+    await expect(page.getByLabel('Bot volume')).toHaveCount(0)
     await expect(page.getByLabel('Voice channel')).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Audit log', exact: true })).toHaveCount(0)
     await page.goto('/videos/fixture/cut')

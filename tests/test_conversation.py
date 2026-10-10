@@ -16,6 +16,7 @@ from app.conversation import MAX_QUEUE, Conversation, matches
 from app.conversation_audio import MAX_CHUNK_SECONDS, SAMPLE_RATE, SILENCE_SECONDS, ReceiveSink, Segmenter, Speech
 from app.db import Database
 from app.events import Events
+from app.trigger_playback import PlaybackContext
 from tests.test_auth import client as auth_fixture
 from tests.test_auth import headers
 from tests.test_auth import login as auth_login
@@ -35,7 +36,8 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
 def login(client: TestClient) -> dict:
     auth_login(client)
     client.app.state.db.execute(
-        "UPDATE users SET permission_overrides=? WHERE id='100'", ('{"view_conversations":true}',)
+        "UPDATE users SET permission_overrides=? WHERE id='100'",
+        ('{"view_conversations":true,"control_recording":true}',),
     )
     return client.get("/api/auth/me").json()
 
@@ -229,8 +231,17 @@ def test_conversation_permission_denials(
     assert client.get("/api/auth/me").status_code == 200
 
 
-def test_live_message_pagination_and_removed_history(client: TestClient) -> None:
+def test_live_message_pagination_and_removed_history(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     login(client)
+    monkeypatch.setattr(
+        type(client.app.state.bot),
+        "voice",
+        property(
+            lambda _self: SimpleNamespace(
+                is_connected=lambda: True, channel=SimpleNamespace(members=[SimpleNamespace(id=100)])
+            )
+        ),
+    )
     db = client.app.state.db
     for index in range(51):
         db.execute(
@@ -376,6 +387,12 @@ def test_trigger_speaker_targets(tmp_path: Path, target: str, speaker: str, *, e
         db = Database(tmp_path / "targets.sqlite3")
         seed(db)
         value = manager(db)
+        participant = SimpleNamespace(id=int(speaker), bot=False)
+        owner = value.bot.voice.channel.members[0]
+        value.bot.voice.channel.members = [owner, participant]
+        value.bot.client.get_guild.return_value.get_member.side_effect = lambda identity: (
+            owner if identity == 100 else participant
+        )
         await value.synchronize()
         db.execute(
             "INSERT INTO conversation_triggers(id,owner_id,clip_id,phrase,mode,target,speakers,cooldown,enabled,"
@@ -763,9 +780,14 @@ def test_global_triggers_are_visible_without_management_permission(client: TestC
     )
 
 
-def test_conversation_access_is_default_denied_and_grants_apply_immediately(client: TestClient) -> None:
+def test_conversation_default_access_and_explicit_denials_apply_immediately(client: TestClient) -> None:
     user = auth_login(client)
-    assert not user["permissions"]["view_conversations"]
+    assert user["permissions"]["view_conversations"]
+    assert client.get("/api/conversations/status").status_code == 200
+    assert client.get("/api/conversation/triggers").status_code == 200
+    client.app.state.db.execute(
+        "UPDATE users SET permission_overrides=? WHERE id='100'", ('{"view_conversations":false}',)
+    )
     for method, endpoint, body in [
         ("GET", "/api/conversations/unknown/messages", None),
         ("GET", "/api/conversations/status", None),
@@ -778,12 +800,13 @@ def test_conversation_access_is_default_denied_and_grants_apply_immediately(clie
     ]:
         assert client.request(method, endpoint, json=body, headers=headers(user)).status_code == 403
     client.app.state.db.execute(
-        "UPDATE users SET permission_overrides=? WHERE id='100'", ('{"view_conversations":true}',)
+        "UPDATE users SET permission_overrides=? WHERE id='100'",
+        ('{"view_conversations":true,"control_recording":true}',),
     )
     assert client.get("/api/conversations/status").status_code == 200
     assert client.get("/api/conversation/triggers").status_code == 200
     client.app.state.db.execute("UPDATE users SET permission_overrides='{}' WHERE id='100'")
-    assert client.get("/api/conversation/triggers").status_code == 403
+    assert client.get("/api/conversation/triggers").status_code == 200
     assert client.get("/api/auth/me").status_code == 200
 
 
@@ -809,7 +832,8 @@ def test_disabling_recording_removes_history_and_preserves_triggers(client: Test
     db = client.app.state.db
     db.execute("INSERT INTO conversations(id,channel_id,channel_name,started_at) VALUES ('history','123','Voice',1)")
     db.execute(
-        "INSERT INTO conversation_messages(id,session_id,speaker_id,speaker_name,started_at,ended_at,text,language) "
+        "INSERT INTO conversation_messages(id,session_id,speaker_id,speaker_name,started_at,"
+        "ended_at,text,language) "
         "VALUES ('text','history','100','Owner',1,2,'Hello','nl')"
     )
     response = client.put("/api/conversations/recording", json={"enabled": False}, headers=headers(user))
@@ -875,6 +899,10 @@ def test_trigger_user_picker_requires_page_access(client: TestClient, endpoint: 
     auth_login(client)
     client.app.state.bot.guild_members = AsyncMock(return_value=[{"id": "100", "name": "Owner", "avatar": None}])
     path = f"/api/{endpoint}/users"
+    assert client.get(path).status_code == 200
+    client.app.state.db.execute(
+        "UPDATE users SET permission_overrides=? WHERE id='100'", (json.dumps({permission: False}),)
+    )
     assert client.get(path).status_code == 403
     client.app.state.db.execute(
         "UPDATE users SET permission_overrides=? WHERE id='100'", (json.dumps({permission: True}),)
@@ -885,20 +913,110 @@ def test_trigger_user_picker_requires_page_access(client: TestClient, endpoint: 
     assert set(users.json()["items"][0]) == {"id", "name", "avatar"}
 
 
-def test_trigger_playback_presence_and_immediate_outside_permission(tmp_path: Path) -> None:
+def test_trigger_playback_checks_participant_presence_instead_of_creator(tmp_path: Path) -> None:
     async def scenario() -> None:
         db = Database(tmp_path / "voice-permission.sqlite3")
         seed(db)
         value = manager(db)
-        value.bot.voice.channel.members = []
+        creator = value.bot.client.get_guild.return_value.get_member.return_value
+        participant = SimpleNamespace(id=200, bot=False)
+        value.bot.voice.channel.members = [participant]
+        value.bot.client.get_guild.return_value.get_member.side_effect = lambda identity: (
+            creator if identity == 100 else participant
+        )
         trigger = {"owner_id": "100", "action": "play"}
+        context = PlaybackContext({}, lambda: True, "200", 123)
         authorization = value.playback.authorization
-        assert await authorization(trigger, lambda: True, None) is not None
-        db.execute("UPDATE users SET permission_overrides=? WHERE id='100'", ('{"play_outside_voice":true}',))
-        assert await authorization(trigger, lambda: True, None) is None
-        db.execute("UPDATE users SET permission_overrides='{}' WHERE id='100'")
-        assert await authorization(trigger, lambda: True, None) is not None
-        assert await authorization({**trigger, "action": "stop_all"}, lambda: True, None) is None
+        assert await authorization(trigger, context) is None
+        value.bot.voice.channel.members = []
+        assert await authorization(trigger, context) is not None
+        assert await authorization({**trigger, "action": "stop_all"}, context) is not None
         db.close()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("present", "override", "allowed"), [(False, False, False), (True, False, True), (False, True, True)]
+)
+def test_live_transcript_presence_and_permission(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, *, present: bool, override: bool, allowed: bool
+) -> None:
+    user = login(client)
+    assert user["permissions"]["always_live_conversation"] is False
+    db = client.app.state.db
+    db.execute(
+        "UPDATE users SET permission_overrides=? WHERE id='100'",
+        (json.dumps({"view_conversations": True, "always_live_conversation": override}),),
+    )
+    db.execute("INSERT INTO conversations(id,channel_id,channel_name,started_at) VALUES ('live','123','Voice',1)")
+    client.app.state.conversation.session = {
+        "id": "live",
+        "channel_id": "123",
+        "channel_name": "Voice",
+        "started_at": 1,
+    }
+    member = SimpleNamespace(id=100, display_name="Me", bot=False, display_avatar=SimpleNamespace(url="avatar"))
+    voice = SimpleNamespace(is_connected=lambda: True, channel=SimpleNamespace(members=[member] if present else []))
+    monkeypatch.setattr(type(client.app.state.bot), "voice", property(lambda _self: voice))
+    assert client.get("/api/conversations/status").json()["can_read_transcript"] is allowed
+    assert client.get("/api/conversations/live/messages").status_code == (200 if allowed else 403)
+    db.execute(
+        "UPDATE users SET permission_overrides=? WHERE id='100'",
+        ('{"view_conversations":false,"always_live_conversation":true}',),
+    )
+    assert client.get("/api/conversations/live/messages").status_code == 403
+    db.execute(
+        "UPDATE users SET permission_overrides=? WHERE id='100'",
+        ('{"view_conversations":true,"always_live_conversation":false}',),
+    )
+    monkeypatch.setattr(type(client.app.state.bot), "voice", property(lambda _self: None))
+    assert client.get("/api/conversations/live/messages").status_code == 403
+
+
+def test_personal_preferences_apply_and_remove_obsolete_popup_setting(client: TestClient) -> None:
+    user = login(client)
+    assert "conversation_popup" not in user["preferences"]
+    preferences = {**user["preferences"], "conversation_popup": True, "preview_volume": 0.4}
+    assert client.put("/api/settings/personal", json=preferences, headers=headers(user)).status_code == 200
+    saved = client.get("/api/auth/me").json()["preferences"]
+    assert "conversation_popup" not in saved
+    assert saved["preview_volume"] == 0.4
+
+
+def test_incremental_messages_include_late_speech_and_recheck_permissions(client: TestClient) -> None:
+    login(client)
+    db = client.app.state.db
+    db.execute(
+        "UPDATE users SET permission_overrides=? WHERE id='100'",
+        ('{"view_conversations":true,"always_live_conversation":true}',),
+    )
+    db.execute("INSERT INTO conversations(id,channel_id,channel_name,started_at) VALUES ('delta','123','Voice',1)")
+    client.app.state.conversation.session = db.one("SELECT * FROM conversations WHERE id='delta'")
+
+    def message(identity: str, started: float) -> None:
+        db.execute(
+            "INSERT INTO conversation_messages(id,session_id,speaker_id,speaker_name,started_at,"
+            "ended_at,text,language) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (identity, "delta", "100", "Speaker", started, started + 1, "Hallo", "nl"),
+        )
+
+    message("first", 20)
+    message("second", 30)
+    initial = client.get("/api/conversations/delta/messages").json()
+    assert [item["id"] for item in initial["items"]] == ["first", "second"]
+    message("late", 10)
+    for index in range(101):
+        message(f"new-{index}", 40 + index)
+    result = client.get("/api/conversations/delta/messages?after=second").json()
+    assert len(result["items"]) == 100
+    assert result["items"][0]["id"] == "late"
+    assert result["has_new"] is True
+    remainder = client.get(f"/api/conversations/delta/messages?after={result['items'][-1]['id']}").json()
+    assert len(remainder["items"]) == 2
+    assert remainder["has_new"] is False
+    assert client.get("/api/conversations/delta/messages?after=missing").status_code == 404
+    assert client.get("/api/conversations/delta/messages?after=first&before=second").status_code == 422
+    db.execute("UPDATE users SET permission_overrides=? WHERE id='100'", ('{"view_conversations":false}',))
+    assert client.get("/api/conversations/delta/messages?after=second").status_code == 403

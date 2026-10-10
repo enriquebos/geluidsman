@@ -36,3 +36,17 @@ test('global connection header, human sidebar, account logout and outside-channe
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width)
   await request.delete(`/api/clips/${clip}`)
 })
+
+test('connection icon uses light red while disconnected and light green while connected', async ({ page, request }) => {
+  let connected = false
+  const data = await (await request.get('/api/state')).json()
+  await page.route('**/api/state', route => route.fulfill({ json: { ...data, status: { ...data.status, connected, channel_name: connected ? 'Voice room' : null, participants: [] } } }))
+  await page.goto('/soundboard')
+  const icon = page.getByRole('banner', { name: 'Discord connection' }).locator('.connection-icon')
+  await expect(icon).toHaveClass(/disconnected/)
+  await expect(icon).toHaveCSS('color', 'rgb(243, 169, 174)')
+  connected = true
+  await page.reload()
+  await expect(icon).toHaveClass(/\bconnected\b/)
+  await expect(icon).toHaveCSS('color', 'rgb(165, 232, 189)')
+})

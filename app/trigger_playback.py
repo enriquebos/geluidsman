@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from app.permissions import can_play_in_channel, effective_permissions
+from app.permissions import effective_permissions
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -38,6 +38,9 @@ def reserve_cooldown(cooldowns: dict[str, float], trigger: dict) -> bool:
 class PlaybackContext:
     details: dict
     valid: Callable[[], bool]
+    participant_id: str
+    channel_id: int
+    departed: bool = False
     namespace: str = "trigger"
     access: str | None = None
     preflight: Callable[[], Awaitable[bool]] | None = None
@@ -56,38 +59,52 @@ class TriggerPlayback:
         )
         return all(effective[key] for key in permissions)
 
-    async def authorization(self, trigger: dict, valid: Callable[[], bool], access: str | None) -> str | None:
+    async def guild_member(self, guild: discord.Guild | None, user_id: str) -> discord.Member | None:
+        if not guild:
+            return None
+        return guild.get_member(int(user_id)) or await asyncio.wait_for(guild.fetch_member(int(user_id)), 5)
+
+    def participant_eligible(self, member: discord.Member | None, context: PlaybackContext) -> bool:
+        voice = self.bot.voice
+        if not member or member.bot or not voice or not voice.is_connected() or voice.channel.id != context.channel_id:
+            return False
+        permissions = voice.channel.permissions_for(member)
+        present = any(str(person.id) == context.participant_id for person in voice.channel.members)
+        return bool(permissions.view_channel and permissions.connect and (context.departed or present))
+
+    async def authorization(self, trigger: dict, context: PlaybackContext) -> str | None:
         permission = "stop_sounds" if trigger.get("action") == "stop_all" else "play_sounds"
-        required = (permission, access) if access else (permission,)
-        if not await asyncio.to_thread(self.permitted, trigger["owner_id"], required):
+        required = (permission, context.access) if context.access else (permission,)
+        if not await self.db.run(self.permitted, trigger["owner_id"], required):
             return "Creator no longer has permission for this trigger action."
         guild = self.bot.client.get_guild(self.settings.discord_guild_id)
-        member = guild.get_member(int(trigger["owner_id"])) if guild else None
-        if guild and not member:
-            member = await asyncio.wait_for(guild.fetch_member(int(trigger["owner_id"])), 5)
+        member = await self.guild_member(guild, trigger["owner_id"])
+        participant = (
+            member
+            if context.participant_id == trigger["owner_id"]
+            else await self.guild_member(guild, context.participant_id)
+        )
         voice = self.bot.voice
-        if not valid() or not member or not voice:
+        if not context.valid() or not member or not voice:
             return "Voice connection or creator membership is unavailable."
         permissions = voice.channel.permissions_for(member)
         if not permissions.view_channel or not permissions.connect:
             return "Creator cannot access the active voice channel."
-        if trigger.get("action") != "stop_all" and not can_play_in_channel(trigger["owner_id"], {}, voice.channel):
-            required = (*required, "play_outside_voice")
+        if not self.participant_eligible(participant, context):
+            return "Triggering participant is no longer eligible for the active voice channel."
         if (
-            trigger.get("action") != "stop_all"
-            and not can_play_in_channel(trigger["owner_id"], {}, voice.channel)
-            and not await asyncio.to_thread(self.permitted, trigger["owner_id"], ("play_outside_voice",))
+            not await self.db.run(self.permitted, trigger["owner_id"], required)
+            or not context.valid()
+            or not self.participant_eligible(participant, context)
         ):
-            return "Creator must be in the bot's voice channel to play sounds."
-        if not await asyncio.to_thread(self.permitted, trigger["owner_id"], required) or not valid():
-            return "Creator permission or voice connection changed."
+            return "Creator permission, participant eligibility or voice connection changed."
         return None
 
     async def prepare(self, trigger: dict, context: PlaybackContext) -> tuple[dict | None, str | None]:
-        reason = await self.authorization(trigger, context.valid, context.access)
+        reason = await self.authorization(trigger, context)
         if not reason and context.preflight and not await context.preflight():
             reason = "Rule changed or participant/connection is no longer eligible."
-        clip = await asyncio.to_thread(self.db.one, "SELECT * FROM clips WHERE id=?", (trigger["clip_id"],))
+        clip = await self.db.run(self.db.one, "SELECT * FROM clips WHERE id=?", (trigger["clip_id"],))
         if not reason and not context.valid():
             reason = "Voice connection is no longer eligible."
         if not reason and trigger.get("action", "play") != "stop_all" and not clip:
@@ -105,7 +122,7 @@ class TriggerPlayback:
                 if stopping:
                     if self.bot.state.mixer:
                         self.bot.state.mixer.stop()
-                    await asyncio.to_thread(
+                    await self.db.run(
                         self.db.audit,
                         trigger["owner_id"],
                         "sound.stop_all",
@@ -118,7 +135,7 @@ class TriggerPlayback:
         except (discord.DiscordException, ValueError, OSError, TimeoutError):
             reason = "Playback unavailable, permission denied, or all playback slots are in use."
         if instance:
-            await asyncio.to_thread(
+            await self.db.run(
                 self.db.audit,
                 trigger["owner_id"],
                 "sound.play",
@@ -129,7 +146,7 @@ class TriggerPlayback:
             )
         if reason:
             details = {**details, "reason": reason}
-        await asyncio.to_thread(
+        await self.db.run(
             self.db.audit,
             trigger["owner_id"],
             "action_trigger.fire" if context.namespace == "actions" else "trigger.play",

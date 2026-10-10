@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
 CATALOGUE = [
     ("admin", "Access admin panel", "Administration"),
+    ("long_sounds", "Create and upload sounds up to 10 minutes", "Sounds"),
     ("high_volume", "Boost sound volume to 1000%", "Sounds"),
     ("play_sounds", "Play sounds", "Soundboard"),
     ("play_outside_voice", "Play sounds outside the voice channel", "Soundboard"),
@@ -28,6 +29,7 @@ CATALOGUE = [
     ("manage_imports", "Manage import jobs", "Library"),
     ("delete_videos", "Delete videos", "Library"),
     ("view_conversations", "Access Conversation page", "Conversation"),
+    ("always_live_conversation", "Always see live conversation", "Conversation"),
     ("control_recording", "Enable or disable recording", "Conversation"),
     ("manage_triggers", "Manage sound triggers", "Conversation"),
     ("view_actions", "Access Actions page", "Actions"),
@@ -39,10 +41,12 @@ DEFAULTS = {
     not in {
         "admin",
         "high_volume",
+        "long_sounds",
         "mute_deafen",
         "master_volume",
-        "view_conversations",
-        "view_actions",
+        "import_channels",
+        "control_recording",
+        "always_live_conversation",
         "play_outside_voice",
     }
     for key, _label, _group in CATALOGUE
@@ -74,7 +78,9 @@ def require_permission(*permissions: str) -> Callable[[Request], Awaitable[dict]
 def require_sound_permission(action: Literal["edit", "delete"]) -> Callable[[Request], Awaitable[dict]]:
     async def verify(request: Request) -> dict:
         user = await request.app.state.auth.current(request)
-        clip = request.app.state.db.one("SELECT creator_id FROM clips WHERE id=?", (request.path_params["clip_id"],))
+        clip = await request.app.state.db.run(
+            request.app.state.db.one, "SELECT creator_id FROM clips WHERE id=?", (request.path_params["clip_id"],)
+        )
         if not clip:
             raise HTTPException(404, "Sound not found.")
         if not user["permissions"][f"{action}_all_sounds"]:

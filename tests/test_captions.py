@@ -260,3 +260,20 @@ def test_fuzzy_prefix_search_order_and_word_timing(tmp_path: Path) -> None:
     assert not db.search_captions("werld", "en", None, 0, 50)
     assert not db.search_captions("!@#$", "all", None, 0, 50)
     db.close()
+
+
+def test_caption_search_index_is_populated_in_one_batch(tmp_path: Path) -> None:
+    db = Database(tmp_path / "captions.sqlite3")
+    captions = track()
+    captions["cues"] *= 200
+    queries = []
+    db.conn.set_trace_callback(queries.append)
+    db.save_source(source(), [captions])
+    inserts = [query for query in queries if query.startswith("INSERT INTO caption_search")]
+    assert len(inserts) == 1
+    assert len(db.rows("SELECT id FROM caption_cues")) == 200
+    assert len(db.search_captions("Hallo", "nl", None, 0, 50)) == 50
+    db.save_source(source("revision"), [track("en")])
+    assert not db.search_captions("Hallo", "nl", None, 0, 50)
+    assert len(db.search_captions("Hallo", "en", None, 0, 50)) == 1
+    db.close()

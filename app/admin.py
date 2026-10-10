@@ -28,7 +28,10 @@ class PermissionOverrides(BaseModel):
 
 def user_permissions(app: FastAPI, user: dict) -> dict:
     user["protected_admin"] = user["id"] in app.state.auth.admin_ids
-    user["overrides"] = json.loads(user.pop("permission_overrides"))
+    defaults = effective_permissions({}, admin=user["protected_admin"])
+    user["overrides"] = {
+        key: value for key, value in json.loads(user.pop("permission_overrides")).items() if value != defaults.get(key)
+    }
     user["permissions"] = effective_permissions(user["overrides"], admin=user["protected_admin"])
     user["admin"] = user["permissions"]["admin"]
     return user
@@ -45,6 +48,8 @@ def update_permissions(app: FastAPI, request: Request, user_id: str, overrides: 
             raise HTTPException(403, "Only this protected administrator can change their own permissions.")
         if protected and overrides.get("admin") is False:
             raise HTTPException(409, "Protected administrator access cannot be disabled.")
+        defaults = effective_permissions({}, admin=protected)
+        overrides = {key: value for key, value in overrides.items() if value != defaults[key]}
         previous = effective_permissions(json.loads(user["permission_overrides"]), admin=protected)
         updated = effective_permissions(overrides, admin=protected)
         changes = [
@@ -60,7 +65,6 @@ def update_permissions(app: FastAPI, request: Request, user_id: str, overrides: 
             user["display_name"],
             details={"target_user_id": user_id, "permission_changes": changes},
         )
-    app.state.events.publish("permissions", {"user_id": user_id})
     return {"permissions": updated, "overrides": overrides}
 
 
@@ -81,12 +85,16 @@ def register_admin_routes(app: FastAPI) -> None:
         page_size: Annotated[int, Query(ge=1, le=50)] = 50,
     ) -> dict:
         search = (q.strip(),) * 3
-        total = app.state.db.one(
-            "SELECT COUNT(*) AS total FROM users WHERE instr(lower(display_name),lower(?))>0 "
-            "OR instr(lower(username),lower(?))>0 OR instr(id,?)>0",
-            search,
+        total = (
+            await app.state.db.run(
+                app.state.db.one,
+                "SELECT COUNT(*) AS total FROM users WHERE instr(lower(display_name),lower(?))>0 "
+                "OR instr(lower(username),lower(?))>0 OR instr(id,?)>0",
+                search,
+            )
         )["total"]
-        rows = app.state.db.rows(
+        rows = await app.state.db.run(
+            app.state.db.rows,
             "SELECT id,username,display_name,avatar,last_login,permission_overrides FROM users WHERE "
             "instr(lower(display_name),lower(?))>0 OR instr(lower(username),lower(?))>0 OR instr(id,?)>0 "
             "ORDER BY display_name COLLATE NOCASE,id LIMIT ? OFFSET ?",
@@ -101,8 +109,12 @@ def register_admin_routes(app: FastAPI) -> None:
 
     @app.put("/api/admin/users/{user_id}/permissions", **options)
     async def save(user_id: str, body: PermissionOverrides, request: Request) -> dict:
-        return update_permissions(app, request, user_id, body.overrides, "permissions.update")
+        result = await app.state.db.run(update_permissions, app, request, user_id, body.overrides, "permissions.update")
+        app.state.events.publish("permissions", {"user_id": user_id})
+        return result
 
     @app.delete("/api/admin/users/{user_id}/permissions", **options)
     async def reset(user_id: str, request: Request) -> dict:
-        return update_permissions(app, request, user_id, {}, "permissions.reset")
+        result = await app.state.db.run(update_permissions, app, request, user_id, {}, "permissions.reset")
+        app.state.events.publish("permissions", {"user_id": user_id})
+        return result

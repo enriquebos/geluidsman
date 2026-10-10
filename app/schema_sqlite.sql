@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     speaker_id TEXT NOT NULL, speaker_name TEXT NOT NULL, avatar TEXT,
     started_at DOUBLE PRECISION NOT NULL, ended_at DOUBLE PRECISION NOT NULL,
-    text TEXT NOT NULL, language TEXT NOT NULL
+    text TEXT NOT NULL, language TEXT NOT NULL, received_order INTEGER
 );
 CREATE TABLE IF NOT EXISTS conversation_triggers (
     id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), clip_id TEXT NOT NULL,
@@ -132,3 +132,9 @@ AND NOT EXISTS (SELECT 1 FROM settings WHERE key='activity_totals_initialized')
 AND (guild_id IS NULL OR guild_id='1352422295402057759') GROUP BY actor_id
 ON CONFLICT(actor_id) DO NOTHING;
 INSERT INTO settings(key,value) VALUES ('activity_totals_initialized','true') ON CONFLICT(key) DO NOTHING;
+
+CREATE TRIGGER IF NOT EXISTS conversation_messages_received_insert AFTER INSERT ON conversation_messages
+BEGIN
+UPDATE conversation_messages SET received_order=NEW.rowid WHERE id=NEW.id;
+END;
+CREATE INDEX IF NOT EXISTS conversation_messages_received ON conversation_messages(session_id,received_order);

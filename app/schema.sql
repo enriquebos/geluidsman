@@ -146,3 +146,6 @@ AND NOT EXISTS (SELECT 1 FROM settings WHERE key='activity_totals_initialized')
 AND (guild_id IS NULL OR guild_id='1352422295402057759') GROUP BY actor_id
 ON CONFLICT(actor_id) DO NOTHING;
 INSERT INTO settings(key,value) VALUES ('activity_totals_initialized','true') ON CONFLICT(key) DO NOTHING;
+
+ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS received_order BIGSERIAL;
+CREATE INDEX IF NOT EXISTS conversation_messages_received ON conversation_messages(session_id,received_order);

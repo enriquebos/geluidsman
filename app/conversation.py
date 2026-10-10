@@ -71,6 +71,7 @@ class Conversation:
         self.http = None
         self.error: str | None = None
         self.dropped = 0
+        self.reported_dropped = 0
         self.cooldowns: dict[str, float] = {}
         self.fired_messages: dict[str, None] = {}
         self.last_cleanup = 0.0
@@ -82,7 +83,7 @@ class Conversation:
         self.model_lock = asyncio.Lock()
 
     async def start(self) -> None:
-        await asyncio.to_thread(self.db.execute, "DELETE FROM conversations")
+        await self.db.run(self.db.execute, "DELETE FROM conversations")
         self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25))
         self.tasks = [asyncio.create_task(self.monitor()), asyncio.create_task(self.process())]
 
@@ -131,7 +132,7 @@ class Conversation:
         while not self.work.empty():
             self.work.get_nowait()
         if session:
-            await asyncio.to_thread(self.db.execute, "DELETE FROM conversations WHERE id=?", (session["id"],))
+            await self.db.run(self.db.execute, "DELETE FROM conversations WHERE id=?", (session["id"],))
             self.events.publish("conversation")
 
     async def select_model(self, name: str) -> dict:
@@ -139,7 +140,7 @@ class Conversation:
             async with self.http.put(self.settings.transcription_url + "/model", json={"model": name}) as response:
                 response.raise_for_status()
                 status = await response.json()
-            await asyncio.to_thread(self.db.set_setting, "transcription_model", name)
+            await self.db.run(self.db.set_setting, "transcription_model", name)
             self.model_status = status
             if status.get("target"):
                 await self.close_session()
@@ -151,7 +152,7 @@ class Conversation:
             return await self.check_model()
 
     async def check_model(self) -> dict:
-        desired = await asyncio.to_thread(self.db.setting, "transcription_model", "large-v3-turbo")
+        desired = await self.db.run(self.db.setting, "transcription_model", "large-v3-turbo")
         if self.http is None:
             return {"model": desired, "phase": "unavailable", "ready": False}
         try:
@@ -159,7 +160,7 @@ class Conversation:
                 response.raise_for_status()
                 status = await response.json()
             if status.get("error") and status.get("ready") and status.get("model") != desired:
-                await asyncio.to_thread(self.db.set_setting, "transcription_model", status["model"])
+                await self.db.run(self.db.set_setting, "transcription_model", status["model"])
                 desired = status["model"]
             if status.get("model") != desired and status.get("ready") and time.monotonic() >= self.model_retry:
                 await self.close_session()
@@ -221,16 +222,16 @@ class Conversation:
             "started_at": time.time(),
             "ended_at": None,
         }
-        await asyncio.to_thread(
+        await self.db.run(
             self.db.execute,
             "INSERT INTO conversations(id,channel_id,channel_name,started_at) VALUES (?,?,?,?)",
             (session["id"], session["channel_id"], session["channel_name"], session["started_at"]),
         )
         if not self.enabled:
-            await asyncio.to_thread(self.db.execute, "DELETE FROM conversations WHERE id=?", (session["id"],))
+            await self.db.run(self.db.execute, "DELETE FROM conversations WHERE id=?", (session["id"],))
             return
         if voice is not self.bot.voice or not voice.is_connected() or self.bot.state.deafened:
-            await asyncio.to_thread(self.db.execute, "DELETE FROM conversations WHERE id=?", (session["id"],))
+            await self.db.run(self.db.execute, "DELETE FROM conversations WHERE id=?", (session["id"],))
             return
         self.allowed = {str(member.id) for member in voice.channel.members if not member.bot}
         self.session, self.voice = session, voice
@@ -252,7 +253,7 @@ class Conversation:
             self.receiver_retry = time.monotonic() + 15
             return
         self.error = None
-        await asyncio.to_thread(self.db.audit, None, "conversation.start", session["id"], session["channel_name"])
+        await self.db.run(self.db.audit, None, "conversation.start", session["id"], session["channel_name"])
         self.events.publish("conversation")
 
     def update_participants(self, voice: VoiceRecvClient) -> None:
@@ -270,6 +271,16 @@ class Conversation:
             return
         self.work.put_nowait((self.session["id"], speech))
 
+    def report_drops(self) -> None:
+        if self.dropped > self.reported_dropped:
+            logging.getLogger("app.conversation").warning(
+                "Dropped %s speech segments because processing could not keep up or work became unavailable "
+                "(total: %s)",
+                self.dropped - self.reported_dropped,
+                self.dropped,
+            )
+            self.reported_dropped = self.dropped
+
     async def monitor(self) -> None:
         tick = 0
         while True:
@@ -277,6 +288,7 @@ class Conversation:
                 if tick % 100 == 0 and self.bot.client.is_ready():
                     await self.synchronize_model()
                 if tick % 50 == 0:
+                    self.report_drops()
                     await self.synchronize()
                 if self.session:
                     self.drain_packets()
@@ -307,7 +319,7 @@ class Conversation:
             self.enqueue(speech)
 
     async def cleanup(self) -> None:
-        await asyncio.to_thread(self.db.execute, "DELETE FROM conversations WHERE ended_at IS NOT NULL")
+        await self.db.run(self.db.execute, "DELETE FROM conversations WHERE ended_at IS NOT NULL")
         self.last_cleanup = time.monotonic()
 
     def current(self, session_id: str, speech: Speech, delay: float = 0) -> bool:
@@ -390,7 +402,7 @@ class Conversation:
         text = str(result.get("text", "")).strip()[:4000]
         if not text or result.get("language") not in {"nl", "en"}:
             return
-        await asyncio.to_thread(
+        await self.db.run(
             self.db.execute,
             "INSERT INTO conversation_messages(id,session_id,speaker_id,speaker_name,avatar,started_at,"
             "ended_at,text,language) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -417,7 +429,7 @@ class Conversation:
             self.fired_messages[speech.id] = None
             if len(self.fired_messages) > MESSAGE_DEDUP_LIMIT:
                 del self.fired_messages[next(iter(self.fired_messages))]
-        triggers = await asyncio.to_thread(
+        triggers = await self.db.run(
             self.db.rows, "SELECT * FROM conversation_triggers WHERE enabled=1 ORDER BY created_at,id"
         )
         for trigger in triggers:
@@ -436,7 +448,7 @@ class Conversation:
     async def schedule_trigger(self, trigger: dict, session_id: str, speech: Speech) -> None:
         if trigger.get("delay", 0):
             if len(self.delayed) >= MAX_QUEUE:
-                await asyncio.to_thread(
+                await self.db.run(
                     self.db.audit,
                     trigger["owner_id"],
                     "trigger.play",
@@ -464,11 +476,22 @@ class Conversation:
 
     async def fire_delayed(self, trigger: dict, session_id: str, speech: Speech) -> None:
         await asyncio.sleep(trigger["delay"])
-        latest = await asyncio.to_thread(
-            self.db.one, "SELECT * FROM conversation_triggers WHERE id=?", (trigger["id"],)
-        )
+        latest = await self.db.run(self.db.one, "SELECT * FROM conversation_triggers WHERE id=?", (trigger["id"],))
         if latest == trigger and latest["enabled"] and self.current(session_id, speech, trigger["delay"]):
             await self.fire(latest, session_id, speech)
+
+    def trigger_valid(self, session_id: str, speech: Speech, delay: float = 0) -> bool:
+        return bool(
+            self.current(session_id, speech, delay)
+            and self.voice.channel.id == int(self.session["channel_id"])
+            and any(str(member.id) == speech.speaker_id and not member.bot for member in self.voice.channel.members)
+        )
+
+    async def trigger_unchanged(self, trigger: dict, session_id: str, speech: Speech) -> bool:
+        latest = await self.db.run(self.db.one, "SELECT * FROM conversation_triggers WHERE id=?", (trigger["id"],))
+        return bool(
+            latest == trigger and latest["enabled"] and self.trigger_valid(session_id, speech, trigger.get("delay", 0))
+        )
 
     async def fire(self, trigger: dict, session_id: str, speech: Speech) -> None:
         await self.playback.execute(
@@ -480,7 +503,10 @@ class Conversation:
                     "action": trigger.get("action", "play"),
                     "delay": trigger.get("delay", 0),
                 },
-                lambda: self.current(session_id, speech, trigger.get("delay", 0)),
+                lambda: self.trigger_valid(session_id, speech, trigger.get("delay", 0)),
+                participant_id=speech.speaker_id,
+                channel_id=int(self.session["channel_id"]) if self.session else -1,
+                preflight=lambda: self.trigger_unchanged(trigger, session_id, speech),
             ),
         )
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from typing import TYPE_CHECKING, Annotated, Literal
@@ -71,13 +70,29 @@ class TriggerInput(BaseModel):
         return list(dict.fromkeys(values))
 
 
+def can_read_live_conversation(request: Request) -> bool:
+    user = request.state.user
+    if user["permissions"].get("always_live_conversation", False):
+        return True
+    voice = request.app.state.bot.voice
+    return bool(
+        voice and voice.is_connected() and any(str(member.id) == user["id"] for member in voice.channel.members)
+    )
+
+
+async def authorize_live_conversation(request: Request) -> None:
+    await require_permission("view_conversations")(request)
+    if not can_read_live_conversation(request):
+        raise HTTPException(403, "Join the bot's voice channel to see the live conversation.")
+
+
 def register_conversation_routes(app: FastAPI) -> None:
     register_trigger_routes(app)
     register_transcription_routes(app)
 
     @app.get("/api/conversations/status", dependencies=[Depends(require_permission("view_conversations"))])
-    async def conversation_status() -> dict:
-        return app.state.conversation.snapshot()
+    async def conversation_status(request: Request) -> dict:
+        return {**app.state.conversation.snapshot(), "can_read_transcript": can_read_live_conversation(request)}
 
     @app.put(
         "/api/conversations/recording",
@@ -85,12 +100,12 @@ def register_conversation_routes(app: FastAPI) -> None:
     )
     async def recording(body: RecordingInput, request: Request) -> dict:
         manager = app.state.conversation
-        await asyncio.to_thread(app.state.db.set_setting, "conversation_enabled", body.enabled)
+        await app.state.db.run(app.state.db.set_setting, "conversation_enabled", body.enabled)
         manager.enabled = body.enabled
         if not body.enabled:
             await manager.close_session()
-            await asyncio.to_thread(app.state.db.execute, "DELETE FROM conversations")
-        await asyncio.to_thread(
+            await app.state.db.run(app.state.db.execute, "DELETE FROM conversations")
+        await app.state.db.run(
             app.state.db.audit, request.state.user["id"], "conversation.recording", details=body.model_dump()
         )
         app.state.events.publish("conversation")
@@ -101,18 +116,26 @@ def register_conversation_routes(app: FastAPI) -> None:
         dependencies=[Depends(require_permission("view_conversations", "control_recording"))],
     )
     async def language(body: LanguageInput, request: Request) -> dict:
-        await asyncio.to_thread(app.state.db.set_setting, "conversation_language", body.language)
+        await app.state.db.run(app.state.db.set_setting, "conversation_language", body.language)
         app.state.conversation.language = body.language
-        await asyncio.to_thread(
+        await app.state.db.run(
             app.state.db.audit, request.state.user["id"], "conversation.recording", details={"language": body.language}
         )
         app.state.events.publish("conversation")
         return {"language": body.language}
 
-    @app.get(
-        "/api/conversations/{session_id}/messages", dependencies=[Depends(require_permission("view_conversations"))]
-    )
-    def messages(session_id: str, before: Annotated[str | None, Query(max_length=100)] = None) -> dict:
+    register_message_routes(app)
+
+
+def register_message_routes(app: FastAPI) -> None:
+    @app.get("/api/conversations/{session_id}/messages", dependencies=[Depends(authorize_live_conversation)])
+    def messages(
+        session_id: str,
+        before: Annotated[str | None, Query(max_length=100)] = None,
+        after: Annotated[str | None, Query(max_length=100)] = None,
+    ) -> dict:
+        if before and after:
+            raise HTTPException(422, "Use either an older or a newer message cursor.")
         db = app.state.db
         manager = app.state.conversation
         if not manager.enabled or not manager.session or manager.session["id"] != session_id:
@@ -121,16 +144,32 @@ def register_conversation_routes(app: FastAPI) -> None:
         if not session:
             raise HTTPException(404, "Conversation not found.")
         boundary = (
-            db.one("SELECT started_at,id FROM conversation_messages WHERE session_id=? AND id=?", (session_id, before))
-            if before
+            db.one(
+                "SELECT started_at,id,received_order FROM conversation_messages WHERE session_id=? AND id=?",
+                (session_id, before or after),
+            )
+            if before or after
             else None
         )
-        if before and not boundary:
+        if (before or after) and not boundary:
             raise HTTPException(404, "Message cursor not found.")
         timestamp = boundary["started_at"] if boundary else time.time() + 86400
         cursor = boundary["id"] if boundary else "~"
+        if after:
+            rows = db.rows(
+                "SELECT * FROM conversation_messages WHERE session_id=? "
+                "AND received_order>? ORDER BY received_order LIMIT 101",
+                (session_id, boundary["received_order"]),
+            )
+            return {
+                "session": session,
+                "items": rows[:MESSAGE_PAGE_SIZE],
+                "has_new": len(rows) > MESSAGE_PAGE_SIZE,
+                "has_older": False,
+            }
         rows = db.rows(
-            "SELECT * FROM conversation_messages WHERE session_id=? AND (started_at<? OR (started_at=? AND id<?)) "
+            "SELECT * FROM conversation_messages WHERE session_id=? "
+            "AND (started_at<? OR (started_at=? AND id<?)) "
             "ORDER BY started_at DESC,id DESC LIMIT 101",
             (session_id, timestamp, timestamp, cursor),
         )
@@ -263,9 +302,7 @@ def register_transcription_routes(app: FastAPI) -> None:
             status = await manager.select_model(body.model)
         except (aiohttp.ClientError, TimeoutError, ValueError) as error:
             raise HTTPException(503, "Could not request the model switch. The current model is unchanged.") from error
-        await asyncio.to_thread(
-            app.state.db.audit, request.state.user["id"], "settings.edit", details=body.model_dump()
-        )
+        await app.state.db.run(app.state.db.audit, request.state.user["id"], "settings.edit", details=body.model_dump())
         app.state.events.publish("conversation")
         return status
 

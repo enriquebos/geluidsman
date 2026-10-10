@@ -5,7 +5,6 @@ import json
 import logging
 import math
 import re
-import shutil
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Annotated, Literal
 
@@ -40,6 +39,9 @@ MIN_CLIP_SECONDS = 0.1
 MAX_DISCORD_ID_LENGTH = 20
 VOICE_MEMBER_CACHE_SECONDS = 15
 STANDARD_CLIP_VOLUME = 3
+LONG_SOUND_SECONDS = 600
+LONG_SOUND_UPLOAD_BYTES = 100 * 1024 * 1024
+STANDARD_SOUND_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
 class ImportInput(BaseModel):
@@ -138,7 +140,7 @@ def create_app(settings: Settings | None = None, *, resume_channel_id: str | Non
         root_logger.addHandler(console)
         db = Database(settings.data_dir / "library.sqlite3", settings.database_url.get_secret_value())
         events = Events()
-        media = Media(settings, db, events)
+        media = await asyncio.to_thread(Media, settings, db, events)
         bot = Bot(settings, db, events)
         app.state.db, app.state.events, app.state.media, app.state.bot = db, events, media, bot
         app.state.auth = Auth(settings, db, bot)
@@ -148,9 +150,9 @@ def create_app(settings: Settings | None = None, *, resume_channel_id: str | Non
         await bot.start()
         try:
             if resume_channel_id:
-                batch = db.one("SELECT status FROM channel_batches WHERE id=?", (resume_channel_id,))
+                batch = await db.run(db.one, "SELECT status FROM channel_batches WHERE id=?", (resume_channel_id,))
                 if batch and batch["status"] == "paused":
-                    media.channels.resume(resume_channel_id)
+                    await media.channels.resume(resume_channel_id)
             yield
         finally:
             await bot.close()
@@ -230,20 +232,21 @@ def register_state_routes(app: FastAPI, settings: Settings) -> None:
         guild_id = str(settings.discord_guild_id)
         member = await app.state.auth.member(request, guild_id, fresh=False) if guild_id else None
         summary = await app.state.media.summary()
+        media_settings = await app.state.db.run(lambda: app.state.media.settings)
         return {
             "user": user,
             "guilds": user["guilds"],
-            "sources": app.state.db.sources(),
-            "clips": app.state.db.clips(user["id"], str(settings.discord_guild_id)),
+            "sources": (await app.state.db.run(app.state.db.sources)),
+            "clips": (await app.state.db.run(app.state.db.clips, user["id"], str(settings.discord_guild_id))),
             "emojis": app.state.bot.emojis(),
-            "jobs": app.state.db.jobs(),
-            "channel_imports": app.state.db.batches(),
+            "jobs": (await app.state.db.run(app.state.db.jobs)),
+            "channel_imports": (await app.state.db.run(app.state.db.batches)),
             "status": app.state.bot.status(int(guild_id)) if guild_id else app.state.bot.status(),
             "channels": app.state.bot.channels(int(guild_id), member) if guild_id else [],
             "limits": {
                 "max_clip_seconds": settings.max_clip_seconds,
-                "max_source_seconds": app.state.media.settings.max_source_seconds,
-                "max_storage_bytes": app.state.media.settings.max_storage_bytes,
+                "max_source_seconds": media_settings.max_source_seconds,
+                "max_storage_bytes": media_settings.max_storage_bytes,
                 "used_bytes": summary["used_bytes"],
             },
             "missing_dependencies": summary["missing_dependencies"],
@@ -251,7 +254,10 @@ def register_state_routes(app: FastAPI, settings: Settings) -> None:
 
     @app.get("/api/jobs", **api_options)
     async def jobs() -> dict[str, object]:
-        return {"jobs": app.state.db.jobs(), "channel_imports": app.state.db.batches()}
+        return {
+            "jobs": (await app.state.db.run(app.state.db.jobs)),
+            "channel_imports": (await app.state.db.run(app.state.db.batches)),
+        }
 
     @app.get("/api/health")
     async def health() -> dict[str, object]:
@@ -281,7 +287,7 @@ def register_library_routes(app: FastAPI, settings: Settings) -> None:
         limit: Annotated[int, Query(ge=1, le=50)] = 50,
     ) -> dict[str, object]:
         return {
-            "results": await asyncio.to_thread(
+            "results": await app.state.db.run(
                 app.state.db.search_captions, q.strip(), language, source_id, offset, limit
             )
         }
@@ -290,14 +296,14 @@ def register_library_routes(app: FastAPI, settings: Settings) -> None:
         "/api/sources/{source_id}/refresh", status_code=202, dependencies=[Depends(require_permission("import_videos"))]
     )
     async def refresh_source(source_id: str, request: Request) -> dict[str, object]:
-        source = app.state.db.one("SELECT * FROM sources WHERE id=?", (source_id,))
+        source = await app.state.db.run(app.state.db.one, "SELECT * FROM sources WHERE id=?", (source_id,))
         if not source:
             raise HTTPException(404, "Source not found.")
-        return {"job_id": app.state.media.import_url(source["url"], source_id, request.state.user["id"])}
+        return {"job_id": await app.state.media.import_url(source["url"], source_id, request.state.user["id"])}
 
     @app.post("/api/imports", status_code=202, dependencies=[Depends(require_permission("import_videos"))])
     async def imports(body: ImportInput, request: Request) -> dict[str, object]:
-        return {"job_id": app.state.media.import_url(body.url.strip(), actor_id=request.state.user["id"])}
+        return {"job_id": await app.state.media.import_url(body.url.strip(), actor_id=request.state.user["id"])}
 
     @app.post(
         "/api/imports/{job_id}/retry",
@@ -305,12 +311,12 @@ def register_library_routes(app: FastAPI, settings: Settings) -> None:
         dependencies=[Depends(require_permission("manage_imports", "import_videos"))],
     )
     async def retry(job_id: str, request: Request) -> dict[str, object]:
-        job = app.state.db.one("SELECT * FROM jobs WHERE id=?", (job_id,))
+        job = await app.state.db.run(app.state.db.one, "SELECT * FROM jobs WHERE id=?", (job_id,))
         if not job:
             raise HTTPException(404, "Import job not found.")
         if job["status"] not in ("failed", "interrupted"):
             raise HTTPException(409, "Only failed or interrupted imports can be retried.")
-        return {"job_id": app.state.media.import_url(job["url"], job["source_id"], request.state.user["id"])}
+        return {"job_id": await app.state.media.import_url(job["url"], job["source_id"], request.state.user["id"])}
 
     register_clip_routes(app, settings)
     register_delete_routes(app)
@@ -320,12 +326,12 @@ def register_library_routes(app: FastAPI, settings: Settings) -> None:
 def register_job_routes(app: FastAPI) -> None:
     @app.delete("/api/imports/{job_id}", dependencies=[Depends(require_permission("manage_imports"))])
     async def dismiss_job(job_id: str) -> dict[str, object]:
-        job = app.state.db.one("SELECT status FROM jobs WHERE id=?", (job_id,))
+        job = await app.state.db.run(app.state.db.one, "SELECT status FROM jobs WHERE id=?", (job_id,))
         if not job:
             raise HTTPException(404, "Import job not found.")
         if job["status"] not in ("failed", "interrupted", "complete"):
             raise HTTPException(409, "Wait for the import to finish before dismissing it.")
-        app.state.db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+        await app.state.db.run(app.state.db.execute, "DELETE FROM jobs WHERE id=?", (job_id,))
         app.state.events.publish("jobs")
         return {"ok": True}
 
@@ -333,30 +339,36 @@ def register_job_routes(app: FastAPI) -> None:
 def register_channel_routes(app: FastAPI) -> None:
     @app.post("/api/channel-imports", status_code=202, dependencies=[Depends(require_permission("import_channels"))])
     async def channel_import(body: ImportInput, request: Request) -> dict[str, object]:
-        return {"batch_id": app.state.media.channels.start(body.url.strip(), request.state.user["id"])}
+        return {"batch_id": await app.state.media.channels.start(body.url.strip(), request.state.user["id"])}
 
-    def get_batch(batch_id: str) -> dict:
-        batch = app.state.db.one("SELECT * FROM channel_batches WHERE id=?", (batch_id,))
+    async def get_batch(batch_id: str) -> dict:
+        batch = await app.state.db.run(app.state.db.one, "SELECT * FROM channel_batches WHERE id=?", (batch_id,))
         if not batch:
             raise HTTPException(404, "Channel import not found.")
         return batch
 
     @app.post("/api/channel-imports/{batch_id}/ignore", dependencies=[Depends(require_permission("manage_imports"))])
     async def ignore_channel(batch_id: str, request: Request) -> dict[str, object]:
-        batch = get_batch(batch_id)
+        batch = await get_batch(batch_id)
         if batch["status"] in ("running", "discovering"):
             raise HTTPException(409, "Pause this channel import before ignoring its alert.")
-        app.state.db.execute("UPDATE channel_batches SET dismissed=1 WHERE id=?", (batch_id,))
-        app.state.db.audit(request.state.user["id"], "channel.ignore", batch_id, batch["title"])
+        await app.state.db.run(app.state.db.execute, "UPDATE channel_batches SET dismissed=1 WHERE id=?", (batch_id,))
+        await app.state.db.run(app.state.db.audit, request.state.user["id"], "channel.ignore", batch_id, batch["title"])
         app.state.events.publish("jobs")
         return {"ok": True}
 
     @app.post("/api/channel-imports/{batch_id}/pause", dependencies=[Depends(require_permission("manage_imports"))])
     async def pause_channel(batch_id: str, request: Request) -> dict[str, object]:
-        if get_batch(batch_id)["status"] not in ("running", "discovering"):
+        if (await get_batch(batch_id))["status"] not in ("running", "discovering"):
             raise HTTPException(409, "This channel import is not running.")
         await app.state.media.channels.pause(batch_id)
-        app.state.db.audit(request.state.user["id"], "channel.pause", batch_id, get_batch(batch_id)["title"])
+        await app.state.db.run(
+            app.state.db.audit,
+            request.state.user["id"],
+            "channel.pause",
+            batch_id,
+            (await get_batch(batch_id))["title"],
+        )
         return {"ok": True}
 
     @app.post(
@@ -365,9 +377,9 @@ def register_channel_routes(app: FastAPI) -> None:
         dependencies=[Depends(require_permission("manage_imports", "import_channels"))],
     )
     async def resume_channel(batch_id: str, request: Request) -> dict[str, object]:
-        if get_batch(batch_id)["status"] not in ("paused", "failed", "complete"):
+        if (await get_batch(batch_id))["status"] not in ("paused", "failed", "complete"):
             raise HTTPException(409, "This channel import is already running.")
-        app.state.media.channels.resume(batch_id, request.state.user["id"])
+        await app.state.media.channels.resume(batch_id, request.state.user["id"])
         return {"ok": True}
 
 
@@ -382,10 +394,17 @@ def register_clip_routes(app: FastAPI, settings: Settings) -> None:
     @app.post("/api/clips", status_code=201, dependencies=[Depends(require_permission("create_sounds"))])
     async def clips(body: ClipInput, request: Request) -> dict[str, object]:
         check_clip_volume(request.state.user, body.volume)
-        source = app.state.db.one("SELECT * FROM sources WHERE id=?", (body.source_id,))
+        source = await app.state.db.run(app.state.db.one, "SELECT * FROM sources WHERE id=?", (body.source_id,))
         if not source:
             raise HTTPException(404, "Source not found.")
-        validate_clip(body.start, body.end, source["duration"], settings.max_clip_seconds)
+        validate_clip(
+            body.start,
+            body.end,
+            source["duration"],
+            LONG_SOUND_SECONDS
+            if request.state.user["permissions"].get("long_sounds", False)
+            else settings.max_clip_seconds,
+        )
         task = asyncio.current_task()
         app.state.clip_tasks.add(task)
         try:
@@ -412,7 +431,15 @@ def register_clip_routes(app: FastAPI, settings: Settings) -> None:
         app.state.clip_tasks.add(task)
         try:
             clip_id = await app.state.media.upload_clip(
-                request.stream(), filename, {**values, "creator_id": request.state.user["id"]}
+                request.stream(),
+                filename,
+                {**values, "creator_id": request.state.user["id"]},
+                max_seconds=LONG_SOUND_SECONDS
+                if request.state.user["permissions"].get("long_sounds", False)
+                else settings.max_clip_seconds,
+                max_bytes=LONG_SOUND_UPLOAD_BYTES
+                if request.state.user["permissions"].get("long_sounds", False)
+                else STANDARD_SOUND_UPLOAD_BYTES,
             )
         finally:
             app.state.clip_tasks.discard(task)
@@ -421,15 +448,19 @@ def register_clip_routes(app: FastAPI, settings: Settings) -> None:
 
     @app.put("/api/clips/{clip_id}/favourite", **api_options)
     async def favourite(clip_id: str, body: FavouriteInput, request: Request) -> dict[str, object]:
-        if not app.state.db.one("SELECT id FROM clips WHERE id=?", (clip_id,)):
+        if not (await app.state.db.run(app.state.db.one, "SELECT id FROM clips WHERE id=?", (clip_id,))):
             raise HTTPException(404, "Sound not found.")
         if body.pinned:
-            app.state.db.execute(
-                "INSERT OR IGNORE INTO user_favourites VALUES (?,?)", (request.state.user["id"], clip_id)
+            await app.state.db.run(
+                app.state.db.execute,
+                "INSERT OR IGNORE INTO user_favourites VALUES (?,?)",
+                (request.state.user["id"], clip_id),
             )
         else:
-            app.state.db.execute(
-                "DELETE FROM user_favourites WHERE user_id=? AND clip_id=?", (request.state.user["id"], clip_id)
+            await app.state.db.run(
+                app.state.db.execute,
+                "DELETE FROM user_favourites WHERE user_id=? AND clip_id=?",
+                (request.state.user["id"], clip_id),
             )
         app.state.events.publish(
             "favourites", {"user_id": request.state.user["id"], "clip_id": clip_id, "pinned": body.pinned}
@@ -439,9 +470,10 @@ def register_clip_routes(app: FastAPI, settings: Settings) -> None:
     @app.patch("/api/clips/{clip_id}", dependencies=[Depends(require_sound_permission("edit"))])
     async def edit_clip(clip_id: str, body: ClipMeta, request: Request) -> dict[str, object]:
         check_clip_volume(request.state.user, body.volume)
-        if not app.state.db.one("SELECT id FROM clips WHERE id=?", (clip_id,)):
+        if not (await app.state.db.run(app.state.db.one, "SELECT id FROM clips WHERE id=?", (clip_id,))):
             raise HTTPException(404, "Sound not found.")
-        app.state.db.change(
+        await app.state.db.run(
+            app.state.db.change,
             "UPDATE clips SET name=?,emoji=?,tags=?,volume=? WHERE id=?",
             (body.name, body.emoji, json.dumps(body.tags), body.volume, clip_id),
             request.state.user["id"],
@@ -457,11 +489,12 @@ def register_delete_routes(app: FastAPI) -> None:
     @app.delete("/api/clips/{clip_id}", dependencies=[Depends(require_sound_permission("delete"))])
     async def delete_clip(clip_id: str, request: Request) -> dict[str, object]:
         async with app.state.media.lock:
-            if not app.state.db.one("SELECT id FROM clips WHERE id=?", (clip_id,)):
+            if not (await app.state.db.run(app.state.db.one, "SELECT id FROM clips WHERE id=?", (clip_id,))):
                 raise HTTPException(404, "Sound not found.")
-            clip = app.state.db.one("SELECT name FROM clips WHERE id=?", (clip_id,))
+            clip = await app.state.db.run(app.state.db.one, "SELECT name FROM clips WHERE id=?", (clip_id,))
             app.state.bot.stop_clip(clip_id)
-            app.state.db.change(
+            await app.state.db.run(
+                app.state.db.change,
                 "DELETE FROM clips WHERE id=?",
                 (clip_id,),
                 request.state.user["id"],
@@ -469,19 +502,20 @@ def register_delete_routes(app: FastAPI) -> None:
                 resource_id=clip_id,
                 name=clip["name"],
             )
-            shutil.rmtree(app.state.media.root / clip_id, ignore_errors=True)
+            await asyncio.to_thread(app.state.media.storage.remove, app.state.media.root / clip_id)
         app.state.events.publish("library")
         return {"ok": True}
 
     @app.delete("/api/sources/{source_id}", dependencies=[Depends(require_permission("delete_videos"))])
     async def delete_source(source_id: str, request: Request) -> dict[str, object]:
         async with app.state.media.lock:
-            source = app.state.db.one("SELECT * FROM sources WHERE id=?", (source_id,))
+            source = await app.state.db.run(app.state.db.one, "SELECT * FROM sources WHERE id=?", (source_id,))
             if not source:
                 raise HTTPException(404, "Source not found.")
-            if app.state.db.one("SELECT id FROM clips WHERE source_id=?", (source_id,)):
+            if await app.state.db.run(app.state.db.one, "SELECT id FROM clips WHERE source_id=?", (source_id,)):
                 raise HTTPException(409, "Delete this source's sounds first.")
-            app.state.db.change(
+            await app.state.db.run(
+                app.state.db.change,
                 "DELETE FROM sources WHERE id=?",
                 (source_id,),
                 request.state.user["id"],
@@ -489,7 +523,9 @@ def register_delete_routes(app: FastAPI) -> None:
                 resource_id=source_id,
                 name=source["title"],
             )
-            shutil.rmtree(app.state.media.root / (source["media_id"] or source_id), ignore_errors=True)
+            await asyncio.to_thread(
+                app.state.media.storage.remove, app.state.media.root / (source["media_id"] or source_id)
+            )
         app.state.events.publish("library")
         return {"ok": True}
 
@@ -521,27 +557,35 @@ def register_voice_routes(app: FastAPI, _settings: Settings) -> None:
     async def connect(guild_id: str, body: ChannelInput, request: Request) -> dict[str, object]:
         state = await voice_target(app, request, guild_id, body.channel_id)
         await state.connect(body.channel_id)
-        app.state.db.audit(request.state.user["id"], "voice.connect", body.channel_id, guild_id=guild_id)
+        await app.state.db.run(
+            app.state.db.audit, request.state.user["id"], "voice.connect", body.channel_id, guild_id=guild_id
+        )
         return {"ok": True, "status": state.status()}
 
     @app.post("/api/guilds/{guild_id}/voice/disconnect", dependencies=[Depends(require_permission("disconnect_voice"))])
     async def disconnect(guild_id: str, request: Request) -> dict[str, object]:
         state = await voice_target(app, request, guild_id)
         await state.disconnect()
-        app.state.db.audit(request.state.user["id"], "voice.disconnect", guild_id=guild_id)
+        await app.state.db.run(app.state.db.audit, request.state.user["id"], "voice.disconnect", guild_id=guild_id)
         return {"ok": True, "status": state.status()}
 
     @app.put("/api/guilds/{guild_id}/voice/state", dependencies=[Depends(require_permission("mute_deafen"))])
     async def voice_flags(guild_id: str, body: VoiceFlags, request: Request) -> dict[str, object]:
         state = await voice_target(app, request, guild_id)
         await state.flags(muted=body.muted, deafened=body.deafened)
-        app.state.db.audit(request.state.user["id"], "voice.state", guild_id=guild_id, details=body.model_dump())
+        await app.state.db.run(
+            app.state.db.audit,
+            request.state.user["id"],
+            "voice.state",
+            guild_id=guild_id,
+            details=body.model_dump(),
+        )
         return {"ok": True, "status": state.status()}
 
     @app.put("/api/guilds/{guild_id}/voice/volume", dependencies=[Depends(require_permission("master_volume"))])
     async def volume(guild_id: str, body: VolumeInput, request: Request) -> dict[str, object]:
         state = await voice_target(app, request, guild_id)
-        state.volume(body.volume)
+        await state.volume(body.volume)
         return {"ok": True, "status": state.status()}
 
     @app.post(
@@ -556,17 +600,24 @@ def register_voice_routes(app: FastAPI, _settings: Settings) -> None:
             raise HTTPException(
                 403, "Join the bot's voice channel to play sounds, or request outside-channel playback permission."
             )
-        clip = app.state.db.one("SELECT * FROM clips WHERE id=?", (clip_id,))
+        clip = await app.state.db.run(app.state.db.one, "SELECT * FROM clips WHERE id=?", (clip_id,))
         if not clip:
             raise HTTPException(404, "Sound not found.")
         try:
             instance = state.play(app.state.media.root / clip_id / "sound.wav", clip)
         except ValueError:
-            app.state.db.audit(
-                request.state.user["id"], "sound.play", clip_id, clip["name"], outcome="rejected", guild_id=guild_id
+            await app.state.db.run(
+                app.state.db.audit,
+                request.state.user["id"],
+                "sound.play",
+                clip_id,
+                clip["name"],
+                outcome="rejected",
+                guild_id=guild_id,
             )
             raise
-        app.state.db.audit(
+        await app.state.db.run(
+            app.state.db.audit,
             request.state.user["id"],
             "sound.play",
             clip_id,
@@ -586,7 +637,7 @@ def register_stop_routes(app: FastAPI) -> None:
         state = await voice_target(app, request, guild_id)
         if state.mixer:
             state.mixer.stop()
-        app.state.db.audit(request.state.user["id"], "sound.stop_all", guild_id=guild_id)
+        await app.state.db.run(app.state.db.audit, request.state.user["id"], "sound.stop_all", guild_id=guild_id)
         return {"ok": True, "status": state.status()}
 
     @app.delete(
@@ -600,8 +651,13 @@ def register_stop_routes(app: FastAPI) -> None:
         if not playback:
             raise HTTPException(404, "Playback not found in this server.")
         state.mixer.stop(instance_id)
-        app.state.db.audit(
-            request.state.user["id"], "sound.stop", playback["clip_id"], playback["name"], guild_id=guild_id
+        await app.state.db.run(
+            app.state.db.audit,
+            request.state.user["id"],
+            "sound.stop",
+            playback["clip_id"],
+            playback["name"],
+            guild_id=guild_id,
         )
         return {"ok": True, "status": state.status()}
 
@@ -620,10 +676,10 @@ def register_media_routes(app: FastAPI, _settings: Settings) -> None:
             if filename in clip_files
             else None
         )
-        if query is None or not app.state.db.one(query, (item_id,)):
+        if query is None or not (await app.state.db.run(app.state.db.one, query, (item_id,))):
             raise HTTPException(404, "Media not found.")
         source = (
-            app.state.db.one("SELECT media_id FROM sources WHERE id=?", (item_id,))
+            (await app.state.db.run(app.state.db.one, "SELECT media_id FROM sources WHERE id=?", (item_id,)))
             if filename in source_files
             else None
         )

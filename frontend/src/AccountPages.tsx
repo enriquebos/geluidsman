@@ -12,12 +12,35 @@ type Operational = { max_source_seconds: number; max_import_bytes: number; max_s
 
 export function SettingsPage({ user, onUser, onError, onNotify }: { user: User; onUser: (user: User) => void; onError: (message: string) => void; onNotify: (message: string) => void }) {
   const [personal, setPersonal] = useState<Preferences>(user.preferences)
-  const [saving, setSaving] = useState(false)
-  return <div className="settings-grid">
-    <section className="settings-panel"><h2>Your Discord account</h2><div className="profile-row">{user.avatar && <img src={user.avatar} alt="" />}<div><strong>{user.display_name}</strong><p>@{user.username}</p><small>Discord ID: {user.id}</small></div></div></section>
-    <section className="settings-panel"><h2>Personal preferences</h2><form className="settings-form" onSubmit={async event => { event.preventDefault(); setSaving(true); try { const preferences = await api<Preferences>('/settings/personal', 'PUT', personal); onUser({ ...user, preferences }); onNotify('Preferences saved.') } catch (error) { onError((error as Error).message) } finally { setSaving(false) } }}><label>Browser preview volume · {Math.round(personal.preview_volume * 100)}%<input type="range" min="0" max="1" step="0.01" value={personal.preview_volume} onChange={event => setPersonal({ ...personal, preview_volume: Number(event.target.value) })} /></label><label>Preferred caption language<ThemedSelect value={personal.caption_language} onChange={selected => setPersonal({ ...personal, caption_language: selected as Preferences['caption_language'] })}><option value="all">Dutch + English</option><option value="nl">Dutch</option><option value="en">English</option></ThemedSelect></label><button className="primary-button" disabled={saving}>Save preferences</button></form></section>
-
-  </div>
+  const currentUser = useRef(user)
+  currentUser.current = user
+  const confirmed = useRef(user.preferences)
+  const sequence = useRef(0)
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const queue = useRef(Promise.resolve())
+  const mounted = useRef(true)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  function change(next: Preferences) {
+    setPersonal(next)
+    const revision = ++sequence.current
+    clearTimeout(timer.current)
+    timer.current = setTimeout(() => {
+      queue.current = queue.current.then(async () => {
+        try {
+          const preferences = await api<Preferences>('/settings/personal', 'PUT', next)
+          confirmed.current = preferences
+          if (revision === sequence.current) { onUser({ ...currentUser.current, preferences }); onNotify('Preferences saved.') }
+        } catch (error) {
+          if (revision === sequence.current) {
+            if (mounted.current) setPersonal(confirmed.current)
+            onUser({ ...currentUser.current, preferences: confirmed.current })
+            onError((error as Error).message)
+          }
+        }
+      })
+    }, 250)
+  }
+  return <div className="settings-grid personal-settings"><section className="settings-panel"><h2>Personal preferences</h2><div className="settings-form"><label>Browser preview volume · {Math.round(personal.preview_volume * 100)}%<input type="range" min="0" max="1" step="0.01" value={personal.preview_volume} onChange={event => change({ ...personal, preview_volume: Number(event.target.value) })} /></label><label>Preferred caption language<ThemedSelect value={personal.caption_language} onChange={selected => change({ ...personal, caption_language: selected as Preferences['caption_language'] })}><option value="all">Dutch + English</option><option value="nl">Dutch</option><option value="en">English</option></ThemedSelect></label><small className="muted">Changes apply automatically.</small></div></section></div>
 }
 
 type AuditEntry = { id: number; timestamp: number; actor_id: string | null; actor_name: string; action: string; resource_id: string | null; resource_name: string; outcome: string; guild_id: string | null; details: Record<string, unknown> }

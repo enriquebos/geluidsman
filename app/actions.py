@@ -83,6 +83,7 @@ class Actions:
         self.generation = 0
         self.processing = 0
         self.dropped = 0
+        self.reported_dropped = 0
         self.overflow: VoiceEvent | None = None
         self.tasks: list[asyncio.Task] = []
         self.error: str | None = None
@@ -201,7 +202,7 @@ class Actions:
         if time.monotonic() < self.speech_check:
             return
         self.speech_check = time.monotonic() + 1
-        wanted = await asyncio.to_thread(
+        wanted = await self.db.run(
             self.db.one,
             "SELECT id FROM action_triggers WHERE enabled=1 AND event IN ('speaking_start','speaking_stop') LIMIT 1",
         )
@@ -260,10 +261,20 @@ class Actions:
     async def start(self) -> None:
         self.tasks = [asyncio.create_task(self.monitor()), asyncio.create_task(self.process())]
 
+    def report_drops(self) -> None:
+        if self.dropped > self.reported_dropped:
+            logging.getLogger("app.actions").warning(
+                "Dropped %s actions because processing could not keep up or work became unavailable (total: %s)",
+                self.dropped - self.reported_dropped,
+                self.dropped,
+            )
+            self.reported_dropped = self.dropped
+
     async def monitor(self) -> None:
         while True:
             self.synchronize()
             try:
+                self.report_drops()
                 await self.flush_overflow()
                 await self.synchronize_speech()
             except (*DATABASE_ERRORS, discord.DiscordException, RuntimeError, ValueError) as error:
@@ -275,7 +286,7 @@ class Actions:
     async def flush_overflow(self) -> None:
         if self.overflow:
             item, self.overflow = self.overflow, None
-            await asyncio.to_thread(
+            await self.db.run(
                 self.db.audit,
                 None,
                 "action_trigger.fire",
@@ -308,15 +319,16 @@ class Actions:
     async def match(self, event: VoiceEvent) -> None:
         if not self.current(event) or time.monotonic() - event.received_at > MAX_EVENT_AGE:
             return
-        rules = await asyncio.to_thread(
+        rules = await self.db.run(
             self.db.rows,
             "SELECT * FROM action_triggers WHERE enabled=1 AND event=? ORDER BY created_at,id",
             (event.event,),
         )
-        for rule in rules:
-            if rule["target"] == "self" and event.actor_id != rule["owner_id"]:
-                continue
-            if rule["target"] == "selected" and event.actor_id not in self.selected_speakers(rule):
+        matching = [rule for rule in rules if self.matches_speaker(rule, event.actor_id)]
+        specific = any(rule["target"] != "everyone" for rule in matching)
+        for rule in matching:
+            if specific and rule["target"] == "everyone":
+                await self.skipped(rule, event, "Ignored because a user-specific action matches this event.")
                 continue
             if not self.current(event) or not reserve_cooldown(self.cooldowns, rule):
                 continue
@@ -332,6 +344,22 @@ class Actions:
     def selected_speakers(rule: dict) -> list:
         return json.loads(rule["speakers"])
 
+    @classmethod
+    def matches_speaker(cls, rule: dict, actor_id: str) -> bool:
+        if rule["target"] == "self":
+            return actor_id == rule["owner_id"]
+        return rule["target"] == "everyone" or actor_id in cls.selected_speakers(rule)
+
+    async def overridden(self, rule: dict, event: VoiceEvent) -> bool:
+        if rule["target"] != "everyone":
+            return False
+        specific = await self.db.run(
+            self.db.rows,
+            "SELECT * FROM action_triggers WHERE enabled=1 AND event=? AND target<>'everyone'",
+            (event.event,),
+        )
+        return any(self.matches_speaker(candidate, event.actor_id) for candidate in specific)
+
     def finish(self, task: asyncio.Task) -> None:
         self.pending.discard(task)
         if not task.cancelled() and task.exception():
@@ -340,7 +368,7 @@ class Actions:
         self.events.publish("actions")
 
     async def skipped(self, rule: dict, event: VoiceEvent, reason: str) -> None:
-        await asyncio.to_thread(
+        await self.db.run(
             self.db.audit,
             rule["owner_id"],
             "action_trigger.fire",
@@ -359,16 +387,17 @@ class Actions:
         self.events.publish("audit")
 
     async def unchanged(self, rule: dict, event: VoiceEvent) -> bool:
-        latest = await asyncio.to_thread(self.db.one, "SELECT * FROM action_triggers WHERE id=?", (rule["id"],))
+        latest = await self.db.run(self.db.one, "SELECT * FROM action_triggers WHERE id=?", (rule["id"],))
         return (
             latest == rule
+            and not await self.overridden(rule, event)
             and self.current(event)
             and time.monotonic() - event.received_at <= rule["delay"] + MAX_EVENT_AGE
         )
 
     async def run(self, rule: dict, event: VoiceEvent) -> None:
         await asyncio.sleep(rule["delay"])
-        latest = await asyncio.to_thread(self.db.one, "SELECT * FROM action_triggers WHERE id=?", (rule["id"],))
+        latest = await self.db.run(self.db.one, "SELECT * FROM action_triggers WHERE id=?", (rule["id"],))
         if (
             latest != rule
             or not latest["enabled"]
@@ -376,6 +405,9 @@ class Actions:
             or time.monotonic() - event.received_at > rule["delay"] + MAX_EVENT_AGE
         ):
             await self.skipped(rule, event, "Rule changed or participant/connection is no longer eligible.")
+            return
+        if await self.overridden(rule, event):
+            await self.skipped(rule, event, "Ignored because a user-specific action matches this event.")
             return
         await self.playback.execute(
             rule,
@@ -390,6 +422,9 @@ class Actions:
                     "delay": rule["delay"],
                 },
                 lambda: self.current(event),
+                participant_id=event.actor_id,
+                channel_id=event.channel_id,
+                departed=event.event == "leave",
                 namespace="actions",
                 access="view_actions",
                 preflight=lambda: self.unchanged(rule, event),

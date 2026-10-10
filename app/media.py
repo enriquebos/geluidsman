@@ -9,7 +9,9 @@ import os
 import shutil
 import sys
 import time
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,9 +21,10 @@ from app.captions import parse
 from app.channels import ChannelImports
 from app.db import DATABASE_ERRORS, Database, new_id
 from app.network import DownloadProxy, public_addresses, validate_url
+from app.storage import Storage, size
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
 
     from app.config import Settings
     from app.events import Events
@@ -69,6 +72,7 @@ class Media:
         self.busy = False
         self.channels = ChannelImports(self)
         self.clean_orphans()
+        self.storage = Storage(self.root)
 
     @property
     def settings(self) -> Settings:
@@ -79,6 +83,14 @@ class Media:
         return self.base_settings.model_copy(
             update={key: value for key, value in overrides.items() if key != "audit_retention_days"}
         )
+
+    @asynccontextmanager
+    async def configured_operation(self) -> AsyncIterator[None]:
+        token = self.operation.set(await self.db.run(lambda: self.settings))
+        try:
+            yield
+        finally:
+            self.operation.reset(token)
 
     def clean_orphans(self) -> None:
         ids = {x["media_id"] or x["id"] for x in self.db.sources()} | {x["id"] for x in self.db.clips()}
@@ -94,24 +106,28 @@ class Media:
         ]
 
     def used_bytes(self) -> int:
-        total = 0
-        pending = [self.root]
-        while pending:
-            try:
-                with os.scandir(pending.pop()) as entries:
-                    for entry in entries:
-                        try:
-                            if entry.is_dir(follow_symlinks=False):
-                                pending.append(entry.path)
-                            elif entry.is_file():
-                                total += entry.stat().st_size
-                        except FileNotFoundError:
-                            continue
-            except FileNotFoundError:
-                continue
-        return total
+        return self.storage.used()
+
+    async def reconcile_storage(self) -> None:
+        if time.monotonic() >= self.storage.next_scan:
+            async with self.lock:
+                if time.monotonic() >= self.storage.next_scan:
+                    await asyncio.to_thread(self.storage.reconcile)
+
+    def persist_media(self, folder: Path, write: Callable[[], None]) -> None:
+        write()
+        self.storage.commit(folder)
+
+    async def commit_media(self, folder: Path, write: Callable[[], None]) -> None:
+        task = asyncio.create_task(self.db.run(self.persist_media, folder, write))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+        self.summary_until = 0
 
     async def summary(self) -> dict:
+        await self.reconcile_storage()
         async with self.summary_lock:
             if time.monotonic() >= self.summary_until:
                 used_bytes, dependencies = await asyncio.gather(
@@ -121,7 +137,7 @@ class Media:
                 self.summary_until = time.monotonic() + SUMMARY_CACHE_SECONDS
             return dict(self.summary_cache)
 
-    def update_job(
+    def persist_job(
         self, job_id: str, status: str, progress: float = 0, error: str | None = None, source_id: str | None = None
     ) -> None:
         previous = self.db.one("SELECT status FROM jobs WHERE id=?", (job_id,))
@@ -143,34 +159,65 @@ class Media:
                     outcome=status,
                     details=details,
                 )
-                self.events.publish("audit")
+
+    def update_job(
+        self, job_id: str, status: str, progress: float = 0, error: str | None = None, source_id: str | None = None
+    ) -> None:
+        self.persist_job(job_id, status, progress, error, source_id)
+        if status in ("complete", "failed", "interrupted"):
+            self.events.publish("audit")
         self.events.publish("jobs")
 
-    def import_url(self, url: str, source_id: str | None = None, actor_id: str | None = None) -> str:
+    async def notify_job(
+        self, job_id: str, status: str, progress: float = 0, error: str | None = None, source_id: str | None = None
+    ) -> None:
+        await self.db.run(self.persist_job, job_id, status, progress, error, source_id)
+        if status in ("complete", "failed", "interrupted"):
+            self.events.publish("audit")
+        self.events.publish("jobs")
+
+    async def import_url(self, url: str, source_id: str | None = None, actor_id: str | None = None) -> str:
         validate_url(url)
-        self.ensure_import_available()
-        self.busy = True
-        job_id = self.db.add_job(url, actor_id)
-        self.db.audit(
-            actor_id, "video.refresh" if source_id else "video.import", source_id or job_id, url, outcome="requested"
-        )
-        if source_id:
-            self.db.execute("UPDATE jobs SET source_id=? WHERE id=?", (source_id, job_id))
-        task = asyncio.create_task(self.import_job(job_id, url, source_id))
-        self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
-        self.events.publish("jobs")
-        return job_id
+        await self.ensure_import_available()
+        try:
+            job_id = await self.db.run(self.db.add_job, url, actor_id)
+            await self.db.run(
+                self.db.audit,
+                actor_id,
+                "video.refresh" if source_id else "video.import",
+                source_id or job_id,
+                url,
+                outcome="requested",
+            )
+            if source_id:
+                await self.db.run(self.db.execute, "UPDATE jobs SET source_id=? WHERE id=?", (source_id, job_id))
+            task = asyncio.create_task(self.import_job(job_id, url, source_id))
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
+            self.events.publish("jobs")
+        except BaseException:
+            self.busy = False
+            raise
+        else:
+            return job_id
 
-    def ensure_import_available(self) -> None:
+    async def ensure_import_available(self) -> None:
         if self.busy:
             msg = "Another import is running. Wait for it to finish."
             raise MediaError(msg)
-        if self.dependencies():
-            raise MediaError("Missing media dependencies: " + ", ".join(self.dependencies()))
-        if self.used_bytes() >= self.settings.max_storage_bytes:
+        dependencies = await asyncio.to_thread(self.dependencies)
+        if dependencies:
+            raise MediaError("Missing media dependencies: " + ", ".join(dependencies))
+        settings = await self.db.run(lambda: self.settings)
+        await self.reconcile_storage()
+        if self.used_bytes() >= settings.max_storage_bytes:
             msg = "Media storage is full. Delete unused sources or sounds."
             raise MediaError(msg)
+
+        if self.busy:
+            message = "Another import is running. Wait for it to finish."
+            raise MediaError(message)
+        self.busy = True
 
     def prepare_import(self, job_id: str, source_id: str | None) -> tuple[str | None, Path, str]:
         job = self.db.one("SELECT actor_id FROM jobs WHERE id=?", (job_id,))
@@ -179,8 +226,8 @@ class Media:
         return (job["actor_id"] if job else None), folder, source_id or folder.name
 
     async def import_job(self, job_id: str, url: str, source_id: str | None = None) -> None:
-        operation_token = self.operation.set(self.settings)
-        actor_id, folder, source_id = self.prepare_import(job_id, source_id)
+        operation_token = self.operation.set(await self.db.run(lambda: self.settings))
+        actor_id, folder, source_id = await self.db.run(self.prepare_import, job_id, source_id)
         committed = False
         try:
             async with self.lock:
@@ -188,14 +235,14 @@ class Media:
                 await asyncio.to_thread(
                     public_addresses, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
                 )
-                self.update_job(job_id, "downloading")
+                await self.notify_job(job_id, "downloading")
                 available = self.settings.max_storage_bytes - self.used_bytes()
                 limit = min(self.settings.max_import_bytes, max(1, available))
                 with DownloadProxy(limit, self.settings.import_timeout_seconds) as proxy:
                     info = await self.download(url, folder, proxy)
                     if proxy.block_reason:
                         raise MediaError(proxy.block_reason)
-                self.update_job(job_id, "processing", 0.92)
+                await self.notify_job(job_id, "processing", 0.92)
                 download = folder / info["file"]
                 await self.convert_source(download, folder)
                 duration = await self.duration(folder / "video.mp4")
@@ -207,46 +254,50 @@ class Media:
                 for file in folder.glob("download*"):
                     file.unlink(missing_ok=True)
                 if (
-                    self.used_bytes() > self.settings.max_storage_bytes
-                    or sum(p.stat().st_size for p in folder.iterdir()) > self.settings.max_import_bytes
+                    await asyncio.to_thread(self.storage.projected, folder) > self.settings.max_storage_bytes
+                    or await asyncio.to_thread(size, folder) > self.settings.max_import_bytes
                 ):
                     msg = "Converted media exceeds the configured storage limit."
                     raise MediaError(msg)
                 tracks = await self.caption_tracks(info, folder, duration)
-                previous = self.db.one("SELECT media_id FROM sources WHERE id=?", (source_id,))
-                self.db.save_source(
-                    {
-                        "id": source_id,
-                        "url": url,
-                        "title": info["title"],
-                        "duration": duration,
-                        "media_id": folder.name,
-                    },
-                    tracks,
-                    actor_id,
+                previous = await self.db.run(self.db.one, "SELECT media_id FROM sources WHERE id=?", (source_id,))
+                await self.commit_media(
+                    folder,
+                    partial(
+                        self.db.save_source,
+                        {
+                            "id": source_id,
+                            "url": url,
+                            "title": info["title"],
+                            "duration": duration,
+                            "media_id": folder.name,
+                        },
+                        tracks,
+                        actor_id,
+                    ),
                 )
                 committed = True
                 if previous:
-                    shutil.rmtree(self.root / (previous["media_id"] or source_id), ignore_errors=True)
-                self.update_job(job_id, "complete", 1, source_id=source_id)
+                    await asyncio.to_thread(self.storage.remove, self.root / (previous["media_id"] or source_id))
+                await self.notify_job(job_id, "complete", 1, source_id=source_id)
                 self.events.publish("library")
         except asyncio.CancelledError:
-            self.update_job(job_id, "interrupted", error="Import interrupted. Retry to start again.")
+            await self.notify_job(job_id, "interrupted", error="Import interrupted. Retry to start again.")
             if not committed:
-                shutil.rmtree(folder, ignore_errors=True)
+                await asyncio.to_thread(self.storage.remove, folder)
             raise
         except (ValueError, OSError, TimeoutError, *DATABASE_ERRORS) as exc:
-            self.report_import_error(job_id, exc)
+            await self.report_import_error(job_id, exc)
             if not committed:
-                shutil.rmtree(folder, ignore_errors=True)
+                await asyncio.to_thread(self.storage.remove, folder)
         finally:
             self.operation.reset(operation_token)
             self.busy = False
 
-    def report_import_error(self, job_id: str, exc: Exception) -> None:
+    async def report_import_error(self, job_id: str, exc: Exception) -> None:
         logging.getLogger("app.media").error("Video import failed for job %s", job_id, exc_info=exc)
         error = str(exc) if isinstance(exc, ValueError) else "Import failed. Check media dependencies and retry."
-        self.update_job(job_id, "failed", error=error)
+        await self.notify_job(job_id, "failed", error=error)
 
     async def download(self, url: str, folder: Path, proxy: DownloadProxy, *, channel: bool = False) -> JsonObject:
         env = os.environ.copy()
@@ -308,9 +359,9 @@ class Media:
             except ValueError:
                 continue
             if data.get("title"):
-                job = self.db.one("SELECT id FROM jobs WHERE status='downloading'")
+                job = await self.db.run(self.db.one, "SELECT id FROM jobs WHERE status='downloading'")
                 if job:
-                    self.db.execute("UPDATE jobs SET title=? WHERE id=?", (data["title"], job["id"]))
+                    await self.db.run(self.db.execute, "UPDATE jobs SET title=? WHERE id=?", (data["title"], job["id"]))
             if data.get("diagnostic"):
                 logging.getLogger("app.downloader").error("Downloader diagnostic: %s", data["diagnostic"])
             if data.get("error"):
@@ -318,9 +369,9 @@ class Media:
             if data.get("complete"):
                 info = data
             if "progress" in data and time.monotonic() - last > PROGRESS_INTERVAL_SECONDS:
-                jobs = self.db.one("SELECT id FROM jobs WHERE status='downloading'")
+                jobs = await self.db.run(self.db.one, "SELECT id FROM jobs WHERE status='downloading'")
                 if jobs:
-                    self.update_job(jobs["id"], "downloading", data["progress"])
+                    await self.notify_job(jobs["id"], "downloading", data["progress"])
                 last = time.monotonic()
         await proc.wait()
         return info
@@ -401,8 +452,8 @@ class Media:
         )
 
     async def create_clip(self, source: JsonObject, values: JsonObject) -> str:
-        async with self.lock:
-            source = self.db.one("SELECT * FROM sources WHERE id=?", (source["id"],))
+        async with self.lock, self.configured_operation():
+            source = await self.db.run(self.db.one, "SELECT * FROM sources WHERE id=?", (source["id"],))
             if not source:
                 message = "Source was deleted while waiting to extract this sound."
                 raise MediaError(message)
@@ -435,48 +486,61 @@ class Media:
                 await process(
                     self.ffmpeg("-i", folder / "sound.wav", "-c:a", "aac", "-b:a", "128k", folder / "preview.m4a")
                 )
-                self.check_storage()
-                self.db.change(
-                    "INSERT INTO clips(id,source_id,name,emoji,tags,start,end,volume,created_at,creator_id) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        folder.name,
-                        source["id"],
-                        values["name"],
-                        values["emoji"],
-                        json.dumps(values["tags"]),
-                        values["start"],
-                        values["end"],
-                        values["volume"],
-                        time.time(),
+                await asyncio.to_thread(self.check_storage, folder)
+                await self.commit_media(
+                    folder,
+                    partial(
+                        self.db.change,
+                        "INSERT INTO clips(id,source_id,name,emoji,tags,start,end,volume,created_at,creator_id) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            folder.name,
+                            source["id"],
+                            values["name"],
+                            values["emoji"],
+                            json.dumps(values["tags"]),
+                            values["start"],
+                            values["end"],
+                            values["volume"],
+                            time.time(),
+                            values.get("creator_id"),
+                        ),
                         values.get("creator_id"),
+                        "sound.create",
+                        resource_id=folder.name,
+                        name=values["name"],
                     ),
-                    values.get("creator_id"),
-                    "sound.create",
-                    resource_id=folder.name,
-                    name=values["name"],
                 )
             except BaseException:
-                shutil.rmtree(folder, ignore_errors=True)
+                await asyncio.to_thread(self.storage.remove, folder)
                 raise
             else:
+                self.summary_until = 0
                 return folder.name
 
-    async def upload_clip(self, chunks: AsyncIterator[bytes], filename: str, values: JsonObject) -> str:
+    async def upload_clip(
+        self,
+        chunks: AsyncIterator[bytes],
+        filename: str,
+        values: JsonObject,
+        *,
+        max_seconds: float | None = None,
+        max_bytes: int = 20 * 1024 * 1024,
+    ) -> str:
         suffix = Path(filename).suffix.lower()
         if suffix not in (".mp3", ".ogg"):
             message = "Choose an .mp3 or .ogg audio file."
             raise MediaError(message)
-        if not all(shutil.which(path) for path in (self.settings.ffmpeg_path, self.settings.ffprobe_path)):
+        if await asyncio.to_thread(self.missing_audio_dependencies):
             message = "Audio uploads require FFmpeg and FFprobe. Ask an administrator to install them."
             raise MediaError(message)
-        async with self.lock:
+        async with self.lock, self.configured_operation():
             folder = self.root / new_id()
             folder.mkdir()
             original = folder / ("upload" + suffix)
             try:
                 budget = min(
-                    20 * 1024 * 1024,
+                    max_bytes,
                     self.settings.max_import_bytes,
                     self.settings.max_storage_bytes - await asyncio.to_thread(self.used_bytes),
                 )
@@ -498,7 +562,7 @@ class Media:
                         30,
                     )
                 )
-                duration = self.validate_upload(info)
+                duration = self.validate_upload(info, max_seconds=max_seconds)
                 await process(
                     self.ffmpeg(
                         "-i",
@@ -522,39 +586,48 @@ class Media:
                     self.ffmpeg("-i", folder / "sound.wav", "-c:a", "aac", "-b:a", "128k", folder / "preview.m4a"), 60
                 )
                 original.unlink()
-                await asyncio.to_thread(self.check_storage)
-                self.db.change(
-                    "INSERT INTO clips(id,source_id,name,emoji,tags,start,end,volume,created_at,creator_id) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        folder.name,
-                        None,
-                        values["name"],
-                        values["emoji"],
-                        json.dumps(values["tags"]),
-                        0,
-                        duration,
-                        values["volume"],
-                        time.time(),
+                await asyncio.to_thread(self.check_storage, folder)
+                await self.commit_media(
+                    folder,
+                    partial(
+                        self.db.change,
+                        "INSERT INTO clips(id,source_id,name,emoji,tags,start,end,volume,created_at,creator_id) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            folder.name,
+                            None,
+                            values["name"],
+                            values["emoji"],
+                            json.dumps(values["tags"]),
+                            0,
+                            duration,
+                            values["volume"],
+                            time.time(),
+                            values["creator_id"],
+                        ),
                         values["creator_id"],
+                        "sound.create",
+                        resource_id=folder.name,
+                        name=values["name"],
                     ),
-                    values["creator_id"],
-                    "sound.create",
-                    resource_id=folder.name,
-                    name=values["name"],
                 )
                 self.summary_until = 0
             except TimeoutError as error:
-                shutil.rmtree(folder, ignore_errors=True)
+                await asyncio.to_thread(self.storage.remove, folder)
                 message = "Audio upload or conversion timed out. Try a smaller file."
                 raise MediaError(message) from error
             except BaseException:
-                shutil.rmtree(folder, ignore_errors=True)
+                await asyncio.to_thread(self.storage.remove, folder)
                 raise
             else:
+                self.summary_until = 0
                 return folder.name
 
-    def validate_upload(self, info: dict) -> float:
+    def missing_audio_dependencies(self) -> bool:
+        return not all(shutil.which(path) for path in (self.settings.ffmpeg_path, self.settings.ffprobe_path))
+
+    def validate_upload(self, info: dict, *, max_seconds: float | None = None) -> float:
+        limit = self.settings.max_clip_seconds if max_seconds is None else max_seconds
         try:
             duration = float(info.get("format", {}).get("duration", 0))
         except (TypeError, ValueError) as error:
@@ -563,13 +636,17 @@ class Media:
         streams = info.get("streams", [])
         if (
             info.get("format", {}).get("format_name") not in ("mp3", "ogg")
-            or not streams
-            or any(stream.get("codec_type") != "audio" for stream in streams)
+            or not any(stream.get("codec_type") == "audio" for stream in streams)
+            or any(
+                stream.get("codec_type") != "audio"
+                and not (stream.get("codec_type") == "video" and stream.get("disposition", {}).get("attached_pic") == 1)
+                for stream in streams
+            )
         ):
             message = "The file must contain MP3 or Ogg audio without video."
             raise MediaError(message)
-        if not math.isfinite(duration) or not MIN_UPLOAD_SECONDS <= duration <= self.settings.max_clip_seconds:
-            message = f"Sounds must be between 0.1 and {self.settings.max_clip_seconds:g} seconds."
+        if not math.isfinite(duration) or not MIN_UPLOAD_SECONDS <= duration <= limit:
+            message = f"Sounds must be between 0.1 and {limit:g} seconds."
             raise MediaError(message)
         return duration
 
@@ -580,15 +657,15 @@ class Media:
             async for chunk in chunks:
                 size += len(chunk)
                 if size > budget:
-                    message = "Audio upload exceeds the 20 MB upload limit or available media storage."
+                    message = "Audio upload exceeds the permitted upload limit or available media storage."
                     raise MediaError(message)
                 await asyncio.to_thread(output.write, chunk)
         if not size:
             message = "Choose a non-empty audio file."
             raise MediaError(message)
 
-    def check_storage(self) -> None:
-        if self.used_bytes() > self.settings.max_storage_bytes:
+    def check_storage(self, folder: Path) -> None:
+        if self.storage.projected(folder) > self.settings.max_storage_bytes:
             message = "Media storage is full. Delete unused sources or sounds."
             raise MediaError(message)
 

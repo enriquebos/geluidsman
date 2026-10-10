@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 
 
 GUILD_MEMBER_PAGE_SIZE = 1000
+EXCLUDED_VOICE_CHANNEL_ID = 1355614484797980723
+VOICE_HANDSHAKE_TIMEOUT = 60.0
+VOICE_RECOVERY_GRACE = 30.0
 
 
 class VoiceError(ValueError):
@@ -41,9 +44,11 @@ class GuildVoice:
         self.retry_at = 0.0
         self.retry_delay = 5.0
         self.connection_task = None
+        self.disconnected_since = None
         self.receiver = None
         self.actions = None
         self.master_volume = db.setting(f"guild:{guild_id}:master_volume", 0.8)
+        self.selected_channel_id = db.setting(f"guild:{guild_id}:selected_channel_id")
 
     @property
     def voice(self) -> discord.VoiceClient | None:
@@ -67,7 +72,8 @@ class GuildVoice:
         return [
             {"id": str(c.id), "name": c.name, "category": c.category.name if c.category else None}
             for c in guild.voice_channels
-            if c.permissions_for(guild.me).view_channel
+            if c.id != EXCLUDED_VOICE_CHANNEL_ID
+            and c.permissions_for(guild.me).view_channel
             and c.permissions_for(guild.me).connect
             and c.permissions_for(guild.me).speak
         ]
@@ -75,16 +81,27 @@ class GuildVoice:
     def status(self) -> JsonObject:
         voice = self.voice
         token = bool(self.settings.discord_token.get_secret_value())
+        connected = bool(voice and voice.is_connected())
+        connection_state = (
+            "connecting"
+            if self.connection_task and not self.connection_task.done()
+            else "connected"
+            if connected
+            else "reconnecting"
+            if self.desired_channel_id
+            else "disconnected"
+        )
         return {
+            "connection_state": connection_state,
             "snapshot_at": time.time(),
             "bot_ready": self.client.is_ready(),
             "configured": token,
             "error": self.error or (None if token else "Add DISCORD_TOKEN to .env and restart to connect your bot."),
             "guild_id": str(self.settings.discord_guild_id),
-            "connected": bool(voice and voice.is_connected()),
+            "connected": connected,
             "channel_id": str(voice.channel.id) if voice else None,
             "channel_name": voice.channel.name if voice else None,
-            "selected_channel_id": self.db.setting(f"guild:{self.settings.discord_guild_id}:selected_channel_id"),
+            "selected_channel_id": self.selected_channel_id,
             "master_volume": self.master_volume,
             "muted": self.muted,
             "deafened": self.deafened,
@@ -118,13 +135,20 @@ class GuildVoice:
             msg = "Choose an accessible voice channel in the configured server."
             raise VoiceError(msg)
         await self.disconnect_unlocked()
+        self.desired_channel_id = channel_id
+        self.disconnected_since = None
         try:
             self.connection_task = asyncio.create_task(
                 channel.connect(
-                    cls=VoiceRecvClient, timeout=None, reconnect=True, self_deaf=self.deafened, self_mute=self.muted
+                    cls=VoiceRecvClient,
+                    timeout=VOICE_HANDSHAKE_TIMEOUT,
+                    reconnect=True,
+                    self_deaf=self.deafened,
+                    self_mute=self.muted,
                 )
             )
-            await self.connection_task
+            self.events.publish("status")
+            await asyncio.wait_for(self.connection_task, timeout=VOICE_HANDSHAKE_TIMEOUT + 15)
             self.mixer = Mixer(self.settings.max_playbacks, self.master_volume, self.notify_playback)
             self.mixer.muted = self.muted
             if self.actions:
@@ -135,6 +159,13 @@ class GuildVoice:
                 raise
             message = "Voice connection cancelled."
             raise VoiceError(message) from None
+        except TimeoutError as exc:
+            await self.disconnect_unlocked()
+            self.retry_at = time.monotonic() + self.retry_delay
+            self.error = "Voice handshake timed out. Retrying automatically."
+            logging.getLogger("app.bot").warning(self.error)
+            self.events.publish("status")
+            raise VoiceError(self.error) from exc
         except Exception as exc:
             logging.getLogger("app.bot").exception("Voice connection failed")
             await self.disconnect_unlocked()
@@ -142,7 +173,10 @@ class GuildVoice:
             raise VoiceError(msg) from exc
         finally:
             self.connection_task = None
-        self.db.set_setting(f"guild:{self.settings.discord_guild_id}:selected_channel_id", str(channel.id))
+        await self.db.run(
+            self.db.set_setting, f"guild:{self.settings.discord_guild_id}:selected_channel_id", str(channel.id)
+        )
+        self.selected_channel_id = str(channel.id)
         self.events.publish("status")
 
     async def reconnect(self) -> None:
@@ -150,13 +184,21 @@ class GuildVoice:
             if not self.desired_channel_id or not self.client.is_ready():
                 return
             voice = self.voice
+            now = time.monotonic()
+            if voice and voice.is_connected():
+                self.disconnected_since = None
+                self.retry_delay = 5.0
+                self.retry_at = now + 5.0
+                return
             if voice:
-                if voice.is_connected():
-                    self.retry_delay = 5.0
-                    self.retry_at = time.monotonic() + 5.0
+                if self.disconnected_since is None:
+                    self.disconnected_since = now
+                if now - self.disconnected_since < VOICE_RECOVERY_GRACE:
+                    return
+            if now < self.retry_at:
                 return
-            if time.monotonic() < self.retry_at:
-                return
+            if voice:
+                logging.getLogger("app.bot").warning("Voice recovery stalled; replacing disconnected voice client")
             try:
                 await self.connect_unlocked(self.desired_channel_id)
             except VoiceError:
@@ -238,12 +280,12 @@ class GuildVoice:
                 await self.receiver.close_session()
             self.events.publish("status")
 
-    def volume(self, value: float) -> None:
+    async def volume(self, value: float) -> None:
         self.master_volume = value
         if self.mixer:
             with self.mixer.lock:
                 self.mixer.volume = value
-        self.db.set_setting(f"guild:{self.settings.discord_guild_id}:master_volume", value)
+        await self.db.run(self.db.set_setting, f"guild:{self.settings.discord_guild_id}:master_volume", value)
         self.events.publish("status")
 
 
@@ -264,6 +306,7 @@ class Bot:
         self.state = GuildVoice(settings, db, events, self.client, settings.discord_guild_id)
         self.task = None
         self.monitor_task = None
+        self.progress_task = None
         self.error = None
         self.guild_state()
 
@@ -272,7 +315,7 @@ class Bot:
             self.error = None
             self.directory_expires = 0.0
             logging.getLogger("app.bot").info("Discord bot connected")
-            self.remember_guild_names()
+            await self.remember_guild_names()
             await self.recover_startup_voice()
             self.events.publish("refresh")
 
@@ -367,11 +410,11 @@ class Bot:
         if guild_id == self.settings.discord_guild_id:
             self.events.publish("refresh")
 
-    def remember_guild_names(self) -> None:
+    async def remember_guild_names(self) -> None:
         for guild in self.client.guilds:
             if guild.id != self.settings.discord_guild_id:
                 continue
-            self.db.set_setting(f"guild:{guild.id}:name", guild.name)
+            await self.db.run(self.db.set_setting, f"guild:{guild.id}:name", guild.name)
 
     def emojis(self) -> list[JsonObject]:
         guild = self.client.get_guild(self.settings.discord_guild_id)
@@ -466,8 +509,28 @@ class Bot:
 
         self.monitor_task = asyncio.create_task(monitor())
 
+        async def progress() -> None:
+            while True:
+                self.publish_playback_progress()
+                await asyncio.sleep(0.5)
+
+        self.progress_task = asyncio.create_task(progress())
+
+    def publish_playback_progress(self) -> None:
+        if not self.events.clients or not self.state.mixer:
+            return
+        items = self.state.mixer.snapshot()
+        if items:
+            self.events.publish(
+                "playback_progress",
+                {"snapshot_at": time.time(), "positions": {item["id"]: item["position"] for item in items}},
+            )
+
     async def close(self) -> None:
         self.closing = True
+        if self.progress_task:
+            self.progress_task.cancel()
+            await asyncio.gather(self.progress_task, return_exceptions=True)
         if self.monitor_task:
             self.monitor_task.cancel()
             await asyncio.gather(self.monitor_task, return_exceptions=True)

@@ -59,15 +59,12 @@ test('shared action editing, targeting, search, toggles, reload and deletion', a
   await request.delete(`/api/clips/${clip}`)
 })
 
-test('denied Actions access hides navigation and direct page controls', async ({ page }) => {
+test('denied Actions access hides navigation and direct page controls', async ({ page, request }) => {
   for (const endpoint of ['/api/auth/me', '/api/state']) {
-    await page.route(`**${endpoint}`, async route => {
-      const response = await route.fetch()
-      const data = await response.json()
-      const user = endpoint.endsWith('/me') ? data : data.user
-      user.permissions.view_actions = false
-      await route.fulfill({ json: data })
-    })
+    const data = await (await request.get(endpoint)).json()
+    const user = endpoint.endsWith('/me') ? data : data.user
+    user.permissions.view_actions = false
+    await page.route(`**${endpoint}`, route => route.fulfill({ json: data }))
   }
   await page.goto('/actions')
   await expect(page.getByRole('heading', { name: 'Actions access required' })).toBeVisible()
@@ -116,4 +113,49 @@ test('new events and organized action sections explain speaking requirements', a
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width)
   const rules = (await (await request.get('/api/actions/triggers')).json()).items
   for (const rule of rules.filter((item: { event: string }) => item.event === 'speaking_stop')) await request.delete(`/api/actions/triggers/${rule.id}`)
+})
+
+
+test('action editor identifies everyone rules overridden by user-specific targeting', async ({ page }) => {
+  const base = { event: 'camera_on', action: 'play', clip_id: 'fixture-sound', target: 'everyone', speakers: [], enabled: true, delay: 0, cooldown: 5, owner_id: '100', owner_name: 'Test Member', sound_name: 'Fallback sound' }
+  await page.route('**/api/actions/status', route => route.fulfill({ json: { connected: false, channel_name: null, backlog: 0, dropped: 0, error: null, events, participants: [] } }))
+  await page.route('**/api/actions/triggers', route => route.fulfill({ json: { items: [{ ...base, id: 'everyone' }, { ...base, id: 'specific', target: 'selected', speakers: ['100'], sound_name: 'Personal sound' }, { ...base, id: 'disabled', enabled: false, sound_name: 'Disabled sound' }, { ...base, id: 'other-event', event: 'mute_on', sound_name: 'Other event sound' }] } }))
+  await page.goto('/actions')
+  const cards = page.locator('.conversation-triggers article')
+  await cards.filter({ hasText: 'Personal sound' }).getByRole('button', { name: 'Edit Camera enabled' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Edit action' })
+  const warning = dialog.getByRole('alert')
+  await expect(warning).toContainText('Fallback sound')
+  await expect(warning).not.toContainText('Disabled sound')
+  await expect(warning).not.toContainText('Other event sound')
+  await selectOption(dialog.getByLabel('Speakers', { exact: true }), 'everyone')
+  await expect(warning).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await cards.filter({ hasText: 'Fallback sound' }).getByRole('button', { name: 'Edit Camera enabled' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('Personal sound')
+  await expect(dialog.getByRole('alert')).toContainText('This action will be ignored')
+})
+
+
+test('override warnings identify affected guild speakers instead of action creators', async ({ page }) => {
+  const base = { event: 'camera_on', action: 'play', clip_id: 'fixture-sound', enabled: true, delay: 0, cooldown: 5, owner_id: '100', owner_name: 'Lampje' }
+  await page.route('**/api/actions/users', route => route.fulfill({ json: { items: [{ id: '300', name: 'Pandabweer' }, { id: '400', name: 'Milan' }] } }))
+  await page.route('**/api/actions/status', route => route.fulfill({ json: { connected: false, channel_name: null, backlog: 0, dropped: 0, error: null, events, participants: [] } }))
+  await page.route('**/api/actions/triggers', route => route.fulfill({ json: { items: [{ ...base, id: 'fallback', target: 'everyone', speakers: [], sound_name: 'SUS' }, { ...base, id: 'germany', target: 'selected', speakers: ['400'], sound_name: 'Duitsland?' }, { ...base, id: 'leave', target: 'selected', speakers: ['300', '400'], sound_name: 'OPROTTEN' }] } }))
+  await page.goto('/actions')
+  const cards = page.locator('.conversation-triggers article')
+  await expect(cards.filter({ hasText: 'OPROTTEN' }).locator('.trigger-summary')).toContainText('Pandabweer, Milan')
+  await expect(page.getByText('0 pending actions', { exact: false })).toHaveCount(0)
+  const dialog = page.getByRole('dialog', { name: 'Edit action' })
+  await cards.filter({ hasText: 'SUS' }).getByRole('button', { name: 'Edit Camera enabled' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('Camera enabled → Duitsland? (Milan)')
+  await expect(dialog.getByRole('alert')).toContainText('Camera enabled → OPROTTEN (Pandabweer, Milan)')
+  await expect(dialog.getByRole('alert')).not.toContainText('Lampje')
+  await page.keyboard.press('Escape')
+  await cards.filter({ hasText: 'OPROTTEN' }).getByRole('button', { name: 'Edit Camera enabled' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('Camera enabled → SUS (Pandabweer, Milan)')
+  await page.keyboard.press('Escape')
+  await cards.filter({ hasText: 'Duitsland?' }).getByRole('button', { name: 'Edit Camera enabled' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('Camera enabled → SUS (Milan)')
+  await expect(dialog.getByRole('alert')).not.toContainText('Pandabweer')
 })

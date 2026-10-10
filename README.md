@@ -441,7 +441,7 @@ Sanitized bot and website diagnostics also appear in `docker compose logs app`.
 
 ## Conversation transcripts and sound triggers
 
-Open `/conversation` to see live speech as chat bubbles, your own on the right and other speakers on the left. Users granted Access Conversation page can read history; this permission is off by default for ordinary users. The navigation item is hidden when access is denied, and direct API requests are also checked. Protected administrators keep their existing full-access defaults. The recording switch is shared and persists across restarts; recording is enabled by default but the app never joins a voice channel at startup. Connecting from Soundboard or Conversation starts transcription once the local model is ready. Recording status and included participants are visible on the Conversation page; the bot does not send transcript notices in voice-channel text chat. Disabling recording stops capture and triggers. Deafening the bot pauses recording until someone with voice-toggle permission undeafens it; changing channels or losing the voice connection ends the session.
+Open `/conversation` to see live speech as chat bubbles, your own on the right and other speakers on the left. Access Conversation page is enabled by default for ordinary users; explicit access denials remain enforced. Reading live transcripts also requires presence in the bot’s voice channel unless Always see live conversation is granted; that permission is off by default for ordinary users. The navigation item is hidden when access is denied, and direct API requests are also checked. Protected administrators keep their existing full-access defaults. The recording switch is shared and persists across restarts; recording is enabled by default but the app never joins a voice channel at startup. Connecting from Soundboard or Conversation starts transcription once the local model is ready. Recording status and included participants are visible on the Conversation page; the bot does not send transcript notices in voice-channel text chat. Disabling recording stops capture and triggers. Deafening the bot pauses recording until someone with voice-toggle permission undeafens it; changing channels or losing the voice connection ends the session.
 
 Dutch and English speech is recognized locally with faster-whisper's multilingual large-v3-turbo model. Audio exists only in bounded memory buffers and is not saved. Finalized transcript text, speaker identities and timestamps are available only during the active conversation. Closing the session, disabling recording or restarting the app deletes them. There is no saved conversation history or retention setting. Transcript text and audio are excluded from logs and SSE payloads. Playback history records trigger and speaker IDs, with skipped-playback explanations.
 
@@ -529,8 +529,7 @@ Conversation shows only the live session, with no history selector or session pa
 ### Voice Actions
 
 Actions sits below Conversation at `/actions` and works even when recording is
-turned off. Grant **Access Actions page** in Admin → Permissions; it is off by
-default. **Manage action triggers** allows shared creation, editing and toggling.
+turned off. **Access Actions page** is enabled by default; admins can deny access in Admin → Permissions. **Manage action triggers** allows shared creation, editing and toggling.
 Only the creator or an administrator can delete a rule.
 
 Rules respond to camera, self-mute, self-deafen, stream and join/leave transitions
@@ -570,10 +569,31 @@ Conversation triggers are shared and unique per sound across all users; add alte
 words to the existing trigger rather than creating another one. Speaker selection
 combines registered users and voice participants in one searchable checkbox dropdown.
 
-Sound playback requires the creator/player to be in the bot's active voice channel
+Manual soundboard playback requires the player to be in the bot's active voice channel
 unless **Play sounds outside the voice channel** is granted (off by default).
-This also applies to automatic triggers. The speaker picker lists human guild
+Automatic Conversation and Actions triggers do not require their creator to be in voice or have outside-channel permission. The triggering human participant must belong to the configured guild, have access to the active channel and remain present for speech and non-leave events. Actions leave events use the channel the participant left and remain eligible after departure. Delayed execution rechecks participant eligibility, the creator's action permissions, guild membership and channel access, rule/session validity, cooldowns, capacity and Actions precedence; ownership and manual playback rules are unchanged. The speaker picker lists human guild
 members through Discord's REST API with a 60-second shared cache. The connection
 bar is the global header; sidebar participants show the active bot channel.
 
 Hall of shame is available at `/hall-of-shame` with the activity-view permission. Its all-time totals are initialized from existing audit records and then retained independently of audit cleanup. Activity already deleted before this feature cannot be recovered. The graph has an independent period filter. Graceful shutdown disconnects voice first; startup recovers only a channel Discord still reports the bot in after an abrupt stop. A hard kill or power loss cannot send a disconnect; Discord controls removal until startup recovery.
+
+Live conversation remains on the Conversation page and is also available from a floating chat button across the app. Personal preferences save automatically; toasts appear at the top right. The button is disabled without an active recording session. Reading transcripts requires being in the bot’s voice channel, unless Always see live conversation is granted. That permission is off by default for ordinary users and does not replace Conversation page access. Backend checks apply to every message request; leaving voice removes transcript access.
+
+Navigation is grouped into Play, Create and Manage. The sidebar names the bot’s voice channel above its human participants. Connection state and mute/deafen state appear in the header; muted, connecting and reconnecting use an orange icon. Active playback chips show progress without extra network polling, and the accessible Bot volume slider controls Discord output without a visible label. Active sounds glow across browsers in both soundboard layouts. Compact controls appear on hover or keyboard-visible focus; pointer playback does not retain the hover state.
+
+Admin permissions label inherited values as Default and explicit values as Custom override, with an overrides-only filter. Personal settings use full-width panels. Voice channel 1355614484797980723 is excluded from channel selection and backend connection checks. Playback progress follows mixer positions pushed over SSE every half-second while sounds are active, rather than advancing from browser elapsed time. The bar transitions smoothly between those authoritative positions without predicting ahead. Toasts sit below the top bar while it is visible and move to the top when it scrolls away.
+
+Recording control is disabled by default for ordinary users. Matching inherited permission values are displayed as Default rather than Custom override. Playback progress interpolates confirmed mixer positions and stays active until server-confirmed completion. Automatic triggers may play sounds uploaded by any user; sound ownership applies to editing and deletion, not playback.
+
+Voice connection handshakes are limited to 60 seconds, with a separate outer cleanup guard. Failed handshakes retain the requested channel for automatic retries. A disconnected voice client gets 30 seconds for library recovery before being replaced. These limits apply only to connection recovery; healthy voice calls have no idle timeout.
+
+The default-off Create and upload sounds up to 10 minutes permission raises video-cut and audio-upload duration to 600 seconds and audio-upload size to 100 MB. Ordinary users retain the configured standard duration (60 seconds by default) and 20 MB upload limit. Existing create-sound permission, source boundaries, import/storage budgets, and supported-format checks still apply. Playback of an existing long sound does not require this creation permission.
+
+
+### Performance changes
+
+Media usage is tracked per local revision and updated after successful imports, extraction, uploads and deletion. Quota checks measure staged files before committing them, and existing media writes remain serialized. The initial scan and ten-minute reconciliation run outside the event loop. Change media through the app; externally edited files can take up to ten minutes to appear in usage totals. Atomic media saves finish before shutdown cancellation can remove their files.
+
+Async database work uses four bounded worker slots with the existing transaction lock. Authenticated requests still read effective permissions from PostgreSQL every time. Caption cues use pipelined batch inserts and one search-index insert per track, preserving transactional refresh rollback. The additive transcript arrival-order column/index allows incremental updates to include late speech from overlapping speakers.
+
+Each browser tab shares one authenticated event stream. Inline and floating chats share permission-checked transcript fetches and history, load only newer messages after initialization, and clear their store when the session becomes inaccessible or the last view closes. Transcript text remains outside SSE. Editor and admin routes load on demand. The measurements and validation are documented in [the performance review](docs/performance-review-2026-10-10.md).

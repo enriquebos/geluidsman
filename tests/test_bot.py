@@ -11,7 +11,7 @@ import pytest
 from discord.ext.voice_recv import VoiceRecvClient
 from pydantic import SecretStr
 
-from app.bot import Bot, VoiceError
+from app.bot import VOICE_HANDSHAKE_TIMEOUT, VOICE_RECOVERY_GRACE, Bot, VoiceError
 from app.config import Settings
 from app.db import Database
 from app.events import Events
@@ -83,7 +83,7 @@ def test_only_configured_guild_has_voice_state(tmp_path: Path) -> None:
         voice.disconnect = AsyncMock()
         bot.client.get_guild = lambda _: Mock(voice_client=voice)
         state.mixer = Mixer(on_change=state.notify_playback)
-        state.volume(0.2)
+        await state.volume(0.2)
         assert state.mixer.volume == 0.2
         await state.disconnect()
         voice.disconnect.assert_awaited_once()
@@ -153,7 +153,7 @@ def test_voice_reconnect_backoff_and_permission_checks(tmp_path: Path) -> None:
         with patch("app.bot.time.monotonic", return_value=106):
             await state.reconnect()
         channel.connect.assert_awaited_once_with(
-            cls=VoiceRecvClient, timeout=None, reconnect=True, self_deaf=False, self_mute=False
+            cls=VoiceRecvClient, timeout=VOICE_HANDSHAKE_TIMEOUT, reconnect=True, self_deaf=False, self_mute=False
         )
         assert state.error is None
         assert state.retry_delay == 5
@@ -211,7 +211,7 @@ def test_disconnect_cancels_connection_without_deadline(tmp_path: Path) -> None:
         assert bot.state.desired_channel_id is None
         assert bot.state.connection_task is None
         channel.connect.assert_awaited_once_with(
-            cls=VoiceRecvClient, timeout=None, reconnect=True, self_deaf=False, self_mute=False
+            cls=VoiceRecvClient, timeout=VOICE_HANDSHAKE_TIMEOUT, reconnect=True, self_deaf=False, self_mute=False
         )
         await bot.close()
         db.close()
@@ -294,6 +294,132 @@ def test_gateway_disconnect_cleans_voice_and_retains_network_recovery_target(tmp
         assert bot.state.desired_channel_id == "123"
         await bot.close()
         assert bot.state.desired_channel_id is None
+        db.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_snapshot_tracks_connecting_and_reconnecting(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "status.sqlite3")
+        bot = Bot(Settings(_env_file=None, discord_token=SecretStr(""), data_dir=tmp_path), db, Events())
+        bot.client.get_guild = Mock(return_value=None)
+        assert bot.state.status()["connection_state"] == "disconnected"
+        bot.state.desired_channel_id = "123"
+        assert bot.state.status()["connection_state"] == "reconnecting"
+        pending = asyncio.create_task(asyncio.sleep(60))
+        bot.state.connection_task = pending
+        assert bot.state.status()["connection_state"] == "connecting"
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        bot.state.connection_task = None
+        voice = Mock(channel=Mock(id=123, name="Voice", members=[]))
+        voice.is_connected.return_value = True
+        bot.client.get_guild = Mock(return_value=Mock(voice_client=voice))
+        assert bot.state.status()["connection_state"] == "connected"
+        bot.client.get_guild = Mock(return_value=None)
+        await bot.close()
+        assert bot.state.status()["connection_state"] == "disconnected"
+        db.close()
+
+    asyncio.run(scenario())
+
+
+def test_excluded_channel_is_not_listed_and_cannot_be_connected(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "excluded.sqlite3")
+        bot = Bot(Settings(_env_file=None, discord_token=SecretStr(""), data_dir=tmp_path), db, Events())
+        blocked = Mock(spec=discord.VoiceChannel, id=1355614484797980723, category=None)
+        allowed = Mock(spec=discord.VoiceChannel, id=123, category=None)
+        guild = Mock(me=Mock(), voice_channels=[blocked, allowed], voice_client=None)
+        guild.get_channel.return_value = blocked
+        bot.client.get_guild = Mock(return_value=guild)
+        bot.client.is_ready = Mock(return_value=True)
+        assert [channel["id"] for channel in bot.channels()] == ["123"]
+        with pytest.raises(VoiceError, match="accessible voice channel"):
+            await bot.state.connect_unlocked(str(blocked.id))
+        blocked.connect.assert_not_called()
+        await bot.close()
+        db.close()
+
+    asyncio.run(scenario())
+
+
+def test_playback_progress_publishes_only_actual_mixer_positions(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "progress.sqlite3")
+        events = Events()
+        bot = Bot(Settings(_env_file=None, discord_token=SecretStr(""), data_dir=tmp_path), db, events)
+        queue = asyncio.Queue()
+        events.clients.add(queue)
+        bot.state.mixer = Mock()
+        bot.state.mixer.snapshot.return_value = [{"id": "instance", "position": 1.25, "name": "Sound"}]
+        bot.publish_playback_progress()
+        message = queue.get_nowait()
+        assert '"positions": {"instance": 1.25}' in message
+        assert "playback_progress" in message
+        assert "Sound" not in message
+        bot.state.mixer.snapshot.return_value = []
+        bot.publish_playback_progress()
+        assert queue.empty()
+        bot.state.mixer = None
+        await bot.close()
+        db.close()
+
+    asyncio.run(scenario())
+
+
+def test_stale_voice_client_recovers_after_grace_but_healthy_calls_remain(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "recovery.sqlite3")
+        bot = Bot(Settings(_env_file=None, discord_token=SecretStr(""), data_dir=tmp_path), db, Events())
+        voice = Mock(spec=discord.VoiceClient)
+        voice.is_connected.return_value = False
+        guild = Mock(voice_client=voice)
+        bot.client.get_guild = lambda _: guild
+        bot.client.is_ready = lambda: True
+        bot.state.desired_channel_id = "123"
+        bot.state.connect_unlocked = AsyncMock()
+        with patch("app.bot.time.monotonic", return_value=100):
+            await bot.state.reconnect()
+        bot.state.connect_unlocked.assert_not_awaited()
+        with patch("app.bot.time.monotonic", return_value=100 + VOICE_RECOVERY_GRACE):
+            await bot.state.reconnect()
+        bot.state.connect_unlocked.assert_awaited_once_with("123")
+        voice.is_connected.return_value = True
+        with patch("app.bot.time.monotonic", return_value=10000):
+            await bot.state.reconnect()
+        assert bot.state.connect_unlocked.await_count == 1
+        assert bot.state.disconnected_since is None
+        await bot.close()
+        db.close()
+
+    asyncio.run(scenario())
+
+
+def test_handshake_timeout_cleans_up_and_retains_retry_target(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "timeout.sqlite3")
+        bot = Bot(Settings(_env_file=None, discord_token=SecretStr(""), data_dir=tmp_path), db, Events())
+        channel = Mock(spec=discord.VoiceChannel)
+        channel.id = 123
+        channel.connect = AsyncMock(side_effect=TimeoutError)
+        guild = Mock(voice_client=None)
+        guild.get_channel.return_value = channel
+        bot.client.get_guild = lambda _: guild
+        bot.client.is_ready = lambda: True
+        bot.state.channels = lambda: [{"id": "123"}]
+        bot.state.disconnect_unlocked = AsyncMock()
+        with pytest.raises(VoiceError, match="handshake timed out"):
+            await bot.state.connect("123")
+        assert bot.state.disconnect_unlocked.await_count == 2
+        assert bot.state.connection_task is None
+        assert bot.state.desired_channel_id == "123"
+        assert bot.state.retry_at > 0
+        assert bot.state.mixer is None
+        await bot.state.disconnect()
+        assert bot.state.desired_channel_id is None
+        await bot.close()
         db.close()
 
     asyncio.run(scenario())

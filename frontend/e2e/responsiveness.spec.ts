@@ -94,7 +94,7 @@ test('sound cards show pending feedback and apply playback without reloading the
     release()
     await expect(card).toHaveClass(/is-playing/)
     await expect(card).not.toHaveClass(/is-pending/)
-    await expect(page.getByText('1 sound playing', { exact: true })).toBeVisible()
+    await expect(page.locator('.playback-bar').getByText('1 sound playing', { exact: true })).toBeVisible()
     expect(stateReads).toBe(reads)
   } finally { release(); await request.delete(`/api/clips/${id}`) }
 })
@@ -147,7 +147,7 @@ test('an older volume response cannot clear a newer pending volume change', asyn
   })
   try {
     await page.goto('/soundboard')
-    const volume = page.getByLabel('Master volume')
+    const volume = page.getByLabel('Bot volume')
     await volume.fill('0.2')
     await page.clock.fastForward(200)
     await expect.poll(() => writes).toBe(1)

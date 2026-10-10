@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
 def prepare(folder: Path) -> Settings:
     db = Database(folder / "library.sqlite3")
+    db.execute("DELETE FROM conversation_triggers")
+    db.execute("DELETE FROM action_triggers")
     db.execute("DELETE FROM clips")
     db.execute("UPDATE users SET preferences='{}'")
     root = folder / "media"

@@ -54,18 +54,24 @@ def register_account_routes(app: FastAPI, settings: Settings) -> None:
 
     @app.put("/api/settings/personal", dependencies=[Depends(authorize)])
     async def save_personal(body: Preferences, request: Request) -> dict:
-        app.state.db.execute(
-            "UPDATE users SET preferences=? WHERE id=?", (body.model_dump_json(), request.state.user["id"])
+        await app.state.db.run(
+            app.state.db.execute,
+            "UPDATE users SET preferences=? WHERE id=?",
+            (body.model_dump_json(), request.state.user["id"]),
         )
         return body.model_dump()
 
     @app.get("/api/settings/app", dependencies=[Depends(authorize_admin)])
     async def application() -> dict:
-        return {"settings": operational_settings(settings, app.state.db), **await app.state.media.summary()}
+        return {
+            "settings": await app.state.db.run(operational_settings, settings, app.state.db),
+            **await app.state.media.summary(),
+        }
 
     @app.put("/api/settings/app", dependencies=[Depends(authorize_admin)])
     async def save_application(body: AppSettings, request: Request) -> dict:
-        app.state.db.change(
+        await app.state.db.run(
+            app.state.db.change,
             "INSERT OR REPLACE INTO settings VALUES (?,?)",
             ("app_settings", body.model_dump_json()),
             request.state.user["id"],
@@ -89,9 +95,12 @@ def register_account_routes(app: FastAPI, settings: Settings) -> None:
         limit: Annotated[int, Query(ge=1, le=100)] = 50,
     ) -> dict:
         guild_id = str(settings.discord_guild_id)
-        retention = operational_settings(settings, app.state.db)["audit_retention_days"]
-        app.state.db.execute("DELETE FROM audit WHERE timestamp<?", (time.time() - retention * 86400,))
-        rows = app.state.db.rows(
+        retention = (await app.state.db.run(operational_settings, settings, app.state.db))["audit_retention_days"]
+        await app.state.db.run(
+            app.state.db.execute, "DELETE FROM audit WHERE timestamp<?", (time.time() - retention * 86400,)
+        )
+        rows = await app.state.db.run(
+            app.state.db.rows,
             "SELECT * FROM audit WHERE (? IS NULL OR actor_id=?) AND (? IS NULL OR action=?) "
             "AND (? IS NULL OR resource_id=?) AND (guild_id IS NULL OR guild_id=?) "
             "AND (? IS NULL OR outcome=?) AND (? IS NULL OR timestamp>=?) "
@@ -116,25 +125,28 @@ def register_account_routes(app: FastAPI, settings: Settings) -> None:
                 limit + 1,
             ),
         )
-        total = app.state.db.one(
-            "SELECT COUNT(*) AS total FROM audit WHERE (? IS NULL OR actor_id=?) AND (? IS NULL OR action=?) "
-            "AND (? IS NULL OR resource_id=?) AND (guild_id IS NULL OR guild_id=?) AND (? IS NULL OR outcome=?) "
-            "AND (? IS NULL OR timestamp>=?) AND (? IS NULL OR timestamp<=?)",
-            (
-                actor_id,
-                actor_id,
-                action,
-                action,
-                resource_id,
-                resource_id,
-                guild_id,
-                outcome,
-                outcome,
-                after,
-                after,
-                until,
-                until,
-            ),
+        total = (
+            await app.state.db.run(
+                app.state.db.one,
+                "SELECT COUNT(*) AS total FROM audit WHERE (? IS NULL OR actor_id=?) AND (? IS NULL OR action=?) "
+                "AND (? IS NULL OR resource_id=?) AND (guild_id IS NULL OR guild_id=?) AND (? IS NULL OR outcome=?) "
+                "AND (? IS NULL OR timestamp>=?) AND (? IS NULL OR timestamp<=?)",
+                (
+                    actor_id,
+                    actor_id,
+                    action,
+                    action,
+                    resource_id,
+                    resource_id,
+                    guild_id,
+                    outcome,
+                    outcome,
+                    after,
+                    after,
+                    until,
+                    until,
+                ),
+            )
         )["total"]
         for row in rows:
             row["details"] = json.loads(row["details"])
@@ -149,17 +161,24 @@ def register_audit_options(app: FastAPI) -> None:
     @app.get("/api/audit/options", dependencies=[Depends(require_permission("view_audit"))])
     async def options() -> dict:
         db = app.state.db
-        users = db.rows("SELECT id,display_name AS name,avatar FROM users ORDER BY display_name COLLATE NOCASE")
+        users = await db.run(
+            db.rows, "SELECT id,display_name AS name,avatar FROM users ORDER BY display_name COLLATE NOCASE"
+        )
         resources = {
-            clip["id"]: {"id": clip["id"], "name": clip["name"], "emoji": clip["emoji"] or "🔊"} for clip in db.clips()
+            clip["id"]: {"id": clip["id"], "name": clip["name"], "emoji": clip["emoji"] or "🔊"}
+            for clip in (await db.run(db.clips))
         }
         resources.update(
-            {source["id"]: {"id": source["id"], "name": source["title"], "emoji": "🎬"} for source in db.sources()}
+            {
+                source["id"]: {"id": source["id"], "name": source["title"], "emoji": "🎬"}
+                for source in (await db.run(db.sources))
+            }
         )
-        history = db.rows(
+        history = await db.run(
+            db.rows,
             "SELECT a.* FROM audit a JOIN (SELECT resource_id,MAX(id) AS latest FROM audit "
             "WHERE resource_id IS NOT NULL AND (action LIKE 'sound.%' OR action LIKE 'video.%') "
-            "GROUP BY resource_id) h ON a.id=h.latest"
+            "GROUP BY resource_id) h ON a.id=h.latest",
         )
         for item in history:
             if item["resource_id"] not in resources:

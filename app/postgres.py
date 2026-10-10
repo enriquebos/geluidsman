@@ -64,8 +64,12 @@ class Connection:
         return Cursor(cursor, inserted["id"] if inserted else None)
 
     def executemany(self, query: str, values: Sequence[SQLParameters]) -> None:
-        for args in values:
-            self.execute(query, args)
+        query = re.sub(r'(?<![\w"])end(?![\w"])', '"end"', query)
+        if query.startswith("INSERT OR IGNORE"):
+            query = query.replace("INSERT OR IGNORE", "INSERT", 1) + " ON CONFLICT DO NOTHING"
+        query = query.replace("%", "%%").replace("?", "%s")
+        with self.raw.cursor() as cursor:
+            cursor.executemany(query, values)
 
     def executescript(self, query: str) -> None:
         self.raw.execute(query)

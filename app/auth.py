@@ -85,10 +85,12 @@ class Auth:
     async def cleanup(self) -> None:
         while True:
             now = time.time()
-            self.db.execute("DELETE FROM sessions WHERE expires_at<? OR last_seen<?", (now, now - IDLE_SECONDS))
-            self.db.execute("DELETE FROM oauth_states WHERE expires_at<?", (now,))
-            retention = self.db.setting("app_settings", {}).get("audit_retention_days", 90)
-            self.db.execute("DELETE FROM audit WHERE timestamp<?", (now - retention * 86400,))
+            await self.db.run(
+                self.db.execute, "DELETE FROM sessions WHERE expires_at<? OR last_seen<?", (now, now - IDLE_SECONDS)
+            )
+            await self.db.run(self.db.execute, "DELETE FROM oauth_states WHERE expires_at<?", (now,))
+            retention = (await self.db.run(self.db.setting, "app_settings", {})).get("audit_retention_days", 90)
+            await self.db.run(self.db.execute, "DELETE FROM audit WHERE timestamp<?", (now - retention * 86400,))
             self.locks = {key: lock for key, lock in self.locks.items() if lock.locked()}
             self.members = {key: value for key, value in self.members.items() if value[0] > now - CHECK_SECONDS}
             await asyncio.sleep(60)
@@ -171,8 +173,9 @@ class Auth:
         if not self.configured:
             raise HTTPException(503, "Discord login is not configured.")
         state, browser = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-        self.db.execute("DELETE FROM oauth_states WHERE expires_at<?", (time.time(),))
-        self.db.execute(
+        await self.db.run(self.db.execute, "DELETE FROM oauth_states WHERE expires_at<?", (time.time(),))
+        await self.db.run(
+            self.db.execute,
             "INSERT INTO oauth_states VALUES (?,?,?,?)",
             (digest(state), digest(browser), internal_path(destination), time.time() + STATE_SECONDS),
         )
@@ -187,11 +190,44 @@ class Auth:
         self.cookie(response, "oauth_browser", browser, STATE_SECONDS)
         return response
 
-    async def complete(self, request: Request) -> RedirectResponse:
-        state_id = digest(request.query_params.get("state", ""))
+    def consume_state(self, state_id: str) -> dict | None:
         with self.db.lock, self.db.conn:
             state = self.db.one("SELECT * FROM oauth_states WHERE id=?", (state_id,))
             self.db.conn.execute("DELETE FROM oauth_states WHERE id=?", (state_id,))
+        return state
+
+    def save_login(self, profile: dict, avatar_url: str | None, now: float, session: dict) -> None:
+        with self.db.lock, self.db.conn:
+            self.db.conn.execute(
+                "INSERT INTO users(id,username,display_name,avatar,created_at,last_login) VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,"
+                "avatar=excluded.avatar,last_login=excluded.last_login",
+                (
+                    profile["id"],
+                    profile["username"],
+                    profile.get("global_name") or profile["username"],
+                    avatar_url,
+                    now,
+                    now,
+                ),
+            )
+            self.db.conn.execute(
+                "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    digest(session["id"]),
+                    profile["id"],
+                    session["csrf"],
+                    self.seal(session["credentials"]),
+                    now + SESSION_SECONDS,
+                    now,
+                    now,
+                    json.dumps(session["guilds"]),
+                ),
+            )
+
+    async def complete(self, request: Request) -> RedirectResponse:
+        state_id = digest(request.query_params.get("state", ""))
+        state = await self.db.run(self.consume_state, state_id)
         if (
             not state
             or state["expires_at"] < time.time()
@@ -217,36 +253,16 @@ class Auth:
             avatar = profile.get("avatar")
             avatar_url = f"https://cdn.discordapp.com/avatars/{profile['id']}/{avatar}.png" if avatar else None
             session_id, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-            with self.db.lock, self.db.conn:
-                self.db.conn.execute(
-                    "INSERT INTO users(id,username,display_name,avatar,created_at,last_login) VALUES (?,?,?,?,?,?) "
-                    "ON CONFLICT(id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,"
-                    "avatar=excluded.avatar,last_login=excluded.last_login",
-                    (
-                        profile["id"],
-                        profile["username"],
-                        profile.get("global_name") or profile["username"],
-                        avatar_url,
-                        now,
-                        now,
-                    ),
-                )
-                self.db.conn.execute(
-                    "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)",
-                    (
-                        digest(session_id),
-                        profile["id"],
-                        csrf,
-                        self.seal(credentials),
-                        now + SESSION_SECONDS,
-                        now,
-                        now,
-                        json.dumps(guilds),
-                    ),
-                )
+            await self.db.run(
+                self.save_login,
+                profile,
+                avatar_url,
+                now,
+                {"id": session_id, "csrf": csrf, "credentials": credentials, "guilds": guilds},
+            )
             old = request.cookies.get("session")
             if old:
-                self.db.execute("DELETE FROM sessions WHERE id=?", (digest(old),))
+                await self.db.run(self.db.execute, "DELETE FROM sessions WHERE id=?", (digest(old),))
             response = RedirectResponse(state["destination"], status_code=302)
             self.cookie(response, "session", session_id, SESSION_SECONDS)
             response.delete_cookie("oauth_browser", path="/")
@@ -266,12 +282,16 @@ class Auth:
                 )
             except HTTPException as error:
                 if error.status_code != status.HTTP_503_SERVICE_UNAVAILABLE:
-                    self.db.execute("DELETE FROM sessions WHERE id=?", (session["id"],))
+                    await self.db.run(self.db.execute, "DELETE FROM sessions WHERE id=?", (session["id"],))
                     raise HTTPException(401, "Please sign in again.") from error
                 raise
             credentials["expires_at"] = time.time() + credentials["expires_in"]
             session["credentials"] = self.seal(credentials)
-            self.db.execute("UPDATE sessions SET credentials=? WHERE id=?", (session["credentials"], session["id"]))
+            await self.db.run(
+                self.db.execute,
+                "UPDATE sessions SET credentials=? WHERE id=?",
+                (session["credentials"], session["id"]),
+            )
         return credentials["access_token"]
 
     def touch_session(self, session: dict, now: float) -> None:
@@ -282,14 +302,14 @@ class Auth:
         if not self.configured:
             raise HTTPException(503, "Discord login is not configured.")
         session_id = digest(request.cookies.get("session", ""))
-        if not self.db.one("SELECT id FROM sessions WHERE id=?", (session_id,)):
+        if not (await self.db.run(self.db.one, "SELECT id FROM sessions WHERE id=?", (session_id,))):
             raise HTTPException(401, "Sign in with Discord to continue.")
         lock = self.locks.setdefault(session_id, asyncio.Lock())
         async with lock:
-            session = self.db.one("SELECT * FROM sessions WHERE id=?", (session_id,))
+            session = await self.db.run(self.db.one, "SELECT * FROM sessions WHERE id=?", (session_id,))
             now = time.time()
             if not session or session["expires_at"] < now or session["last_seen"] < now - IDLE_SECONDS:
-                self.db.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+                await self.db.run(self.db.execute, "DELETE FROM sessions WHERE id=?", (session_id,))
                 raise HTTPException(401, "Sign in with Discord to continue.")
             if csrf and request.method not in ("GET", "HEAD", "OPTIONS"):
                 origin = request.headers.get("origin")
@@ -304,18 +324,20 @@ class Auth:
                     guilds = await self.shared_guilds(await self.token(session))
                 except HTTPException as error:
                     if error.status_code == status.HTTP_403_FORBIDDEN:
-                        self.db.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+                        await self.db.run(self.db.execute, "DELETE FROM sessions WHERE id=?", (session_id,))
                         raise HTTPException(401, "Please sign in again.") from error
                     raise
                 if not guilds:
-                    self.db.execute("DELETE FROM sessions WHERE user_id=?", (session["user_id"],))
+                    await self.db.run(self.db.execute, "DELETE FROM sessions WHERE user_id=?", (session["user_id"],))
                     raise HTTPException(403, "You must be a member of the configured Discord server.")
                 session["guilds"] = json.dumps(guilds)
-                self.db.execute(
-                    "UPDATE sessions SET checked_at=?,guilds=? WHERE id=?", (now, session["guilds"], session_id)
+                await self.db.run(
+                    self.db.execute,
+                    "UPDATE sessions SET checked_at=?,guilds=? WHERE id=?",
+                    (now, session["guilds"], session_id),
                 )
-            self.touch_session(session, now)
-            user = self.db.one("SELECT * FROM users WHERE id=?", (session["user_id"],))
+            await self.db.run(self.touch_session, session, now)
+            user = await self.db.run(self.db.one, "SELECT * FROM users WHERE id=?", (session["user_id"],))
             user["protected_admin"] = user["id"] in self.admin_ids
             user["permissions"] = effective_permissions(
                 json.loads(user.pop("permission_overrides")), admin=user["protected_admin"]
@@ -328,6 +350,7 @@ class Auth:
                 **json.loads(user["preferences"]),
             }
             user["preferences"].pop("default_guild_id", None)
+            user["preferences"].pop("conversation_popup", None)
             user["guilds"] = [
                 item for item in json.loads(session["guilds"]) if item["id"] == str(self.settings.discord_guild_id)
             ]
@@ -392,9 +415,13 @@ def register_auth_routes(app: FastAPI) -> None:
     async def logout(request: Request) -> RedirectResponse:
         await app.state.auth.current(request, csrf=True)
         if request.url.path.endswith("logout-all"):
-            app.state.db.execute("DELETE FROM sessions WHERE user_id=?", (request.state.user["id"],))
+            await app.state.db.run(
+                app.state.db.execute, "DELETE FROM sessions WHERE user_id=?", (request.state.user["id"],)
+            )
         else:
-            app.state.db.execute("DELETE FROM sessions WHERE id=?", (request.state.session["id"],))
+            await app.state.db.run(
+                app.state.db.execute, "DELETE FROM sessions WHERE id=?", (request.state.session["id"],)
+            )
         response = RedirectResponse("/login", status_code=303)
         response.delete_cookie("session", path="/")
         return response
