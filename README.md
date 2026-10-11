@@ -79,6 +79,70 @@ The application is **1502044170406199416**, restricted to server
 **1352422295402057759**. The bot needs View Channel, Connect and Speak. The token
 is used only by the backend; the dashboard cannot read `.env`.
 
+## Command shortcuts
+
+Optional [Just](https://just.systems/man/en/packages.html) shortcuts are defined in
+`justfile`. Install on Windows from Command Prompt or PowerShell:
+
+```text
+winget install --id Casey.Just --exact
+```
+
+Open a new terminal after installation. On Linux, install `just` using your
+distribution's package manager. Run `just` from the project directory to list
+shortcuts. Windows recipes use Command Prompt; Linux recipes use `sh`.
+
+| Command | Purpose |
+| --- | --- |
+| `just start` | Start the existing stack and wait for health checks |
+| `just stop` | Stop the app first, then the worker and database; preserve data |
+| `just update` | Build and deploy updated images with health checks |
+| `just status` | Show container status |
+| `just logs` / `just worker-logs` | Follow recent app / transcription logs |
+| `just check` | Validate Poetry, strict Ruff and formatting |
+| `just format` | Format Python source and tests |
+| `just build` | Build the dashboard |
+| `just test-backend` | Build and run the isolated Docker backend tests |
+| `just test-browser` | Run desktop and touch browser tests |
+| `just test` | Run both test suites |
+| `just verify` | Check Python, build the dashboard and run both test suites |
+
+Runtime shortcuts require Docker and the configured `.env`. Development shortcuts
+also require the native development dependencies described below, installed Poetry
+and npm dependencies, and Playwright Chromium. Before the first Docker backend
+test, start the database and create the isolated test database once:
+
+```text
+docker compose up -d --wait db
+docker compose exec -T db createdb -U geluidsman geluidsman_test
+```
+
+Use your configured PostgreSQL user if different. Browser tests use their existing
+isolated fixture and never join Discord voice. For CPU-only installations, set
+`COMPOSE_FILE` to `compose.yaml;compose.cpu.yaml` on Windows or
+`compose.yaml:compose.cpu.yaml` on Linux before running shortcuts; Docker Compose
+applies that selection to every runtime and backend-test command. Just does not
+load `.env` itself; Compose continues to manage secrets. Direct commands and the
+backup/restore procedure below remain available.
+
+## Consistent sound loudness
+
+New uploads and video cuts automatically measure integrated loudness using
+FFmpeg and apply a constant gain toward **-16 LUFS**, limited to **-2 dB true peak**
+and at most **24 dB amplification**. The normalized PCM also produces the browser
+preview. Processing happens once at creation, never during Discord playback.
+Sound volume remains an adjustable multiplier; 100% uses the normalized baseline.
+
+This preserves dynamics and exact duration rather than compressing the sound.
+Sounds with large peaks may stay quieter to preserve headroom. Clips too short for
+integrated loudness use a -19 dBFS RMS fallback with the same peak ceiling; silence stays silent. Normalization
+does not remove noise, repair existing distortion or prevent clipping from boosted
+volume or overlapping playback. Listen with the existing browser preview controls.
+
+The existing sound library was normalized and every saved sound volume reset to
+100%. After listening and approval, the temporary batch tool was removed.
+Existing media is not processed again at startup.
+
 ## Page URLs
 
 The soundboard is `/soundboard`, the video library is `/videos`, and the waveform
@@ -356,10 +420,7 @@ remain intact. Never include `.env`, session cookies, credentials, or callback
 codes in diagnostics. Uvicorn access logs remain disabled so callback codes
 are not logged. Revoke grants from Discord's Authorized Apps when needed.
 
-A pre-authentication SQLite backup was created under `.runtime/backups` during
-this installation. Schema additions preserve existing sources and clips. Do
-not restore an older schema while this server is running. Tests use explicit
-isolated fixture identities; production has no anonymous/test-auth fallback.
+Tests use explicit isolated fixture identities; production has no anonymous/test-auth fallback.
 
 Strict Ruff's additional focused exceptions cover fixed audit/query field
 interfaces (`PLR0913` in database/accounts modules) and Discord's member
@@ -441,7 +502,7 @@ Sanitized bot and website diagnostics also appear in `docker compose logs app`.
 
 ## Conversation transcripts and sound triggers
 
-Open `/conversation` to see live speech as chat bubbles, your own on the right and other speakers on the left. Access Conversation page is enabled by default for ordinary users; explicit access denials remain enforced. Reading live transcripts also requires presence in the bot’s voice channel unless Always see live conversation is granted; that permission is off by default for ordinary users. The navigation item is hidden when access is denied, and direct API requests are also checked. Protected administrators keep their existing full-access defaults. The recording switch is shared and persists across restarts; recording is enabled by default but the app never joins a voice channel at startup. Connecting from Soundboard or Conversation starts transcription once the local model is ready. Recording status and included participants are visible on the Conversation page; the bot does not send transcript notices in voice-channel text chat. Disabling recording stops capture and triggers. Deafening the bot pauses recording until someone with voice-toggle permission undeafens it; changing channels or losing the voice connection ends the session.
+Open `/conversation` to see live speech as chat bubbles, your own on the right and other speakers on the left. Access Conversation page is enabled by default for ordinary users; explicit access denials remain enforced. Reading live transcripts also requires presence in the bot’s voice channel unless Always see live conversation is granted; that permission is off by default for ordinary users. The navigation item is hidden when access is denied, and direct API requests are also checked. Protected administrators keep their existing full-access defaults. The recording switch is shared and persists across restarts; recording is enabled by default; startup reconnects a previously active channel after resetting voice state. Connecting from Soundboard or Conversation starts transcription once the local model is ready. Recording status and included participants are visible on the Conversation page; the bot does not send transcript notices in voice-channel text chat. Disabling recording stops capture and triggers. Deafening the bot pauses recording until someone with voice-toggle permission undeafens it; changing channels or losing the voice connection ends the session.
 
 Dutch and English speech is recognized locally with faster-whisper's multilingual large-v3-turbo model. Audio exists only in bounded memory buffers and is not saved. Finalized transcript text, speaker identities and timestamps are available only during the active conversation. Closing the session, disabling recording or restarting the app deletes them. There is no saved conversation history or retention setting. Transcript text and audio are excluded from logs and SSE payloads. Playback history records trigger and speaker IDs, with skipped-playback explanations.
 
@@ -546,7 +607,7 @@ Deleted sounds and capacity failures are skipped without retry and appear in the
 audit log. Successful playback also contributes to normal sound statistics.
 
 Deployment adds the action-trigger table while preserving existing users, media,
-permissions and jobs. The bot does not join voice at startup. Automated verification
+permissions and jobs. Startup reconnects only a reported or persisted active connection after resetting voice state. Automated verification
 uses simulated events; real Discord events still require a user-controlled call.
 
 Actions additionally supports **First person joins**, ignoring bots when checking
@@ -575,7 +636,7 @@ Automatic Conversation and Actions triggers do not require their creator to be i
 members through Discord's REST API with a 60-second shared cache. The connection
 bar is the global header; sidebar participants show the active bot channel.
 
-Hall of shame is available at `/hall-of-shame` with the activity-view permission. Its all-time totals are initialized from existing audit records and then retained independently of audit cleanup. Activity already deleted before this feature cannot be recovered. The graph has an independent period filter. Graceful shutdown disconnects voice first; startup recovers only a channel Discord still reports the bot in after an abrupt stop. A hard kill or power loss cannot send a disconnect; Discord controls removal until startup recovery.
+Hall of shame is available at `/hall-of-shame` with the activity-view permission. Its all-time totals are initialized from existing audit records and then retained independently of audit cleanup. Activity already deleted before this feature cannot be recovered. The graph has an independent period filter. Graceful shutdown disconnects voice first; startup resets and reconnects the reported or persisted last active channel. A hard kill or power loss cannot send a disconnect; Discord controls removal until startup recovery.
 
 Live conversation remains on the Conversation page and is also available from a floating chat button across the app. Personal preferences save automatically; toasts appear at the top right. The button is disabled without an active recording session. Reading transcripts requires being in the bot’s voice channel, unless Always see live conversation is granted. That permission is off by default for ordinary users and does not replace Conversation page access. Backend checks apply to every message request; leaving voice removes transcript access.
 
@@ -597,3 +658,62 @@ Media usage is tracked per local revision and updated after successful imports, 
 Async database work uses four bounded worker slots with the existing transaction lock. Authenticated requests still read effective permissions from PostgreSQL every time. Caption cues use pipelined batch inserts and one search-index insert per track, preserving transactional refresh rollback. The additive transcript arrival-order column/index allows incremental updates to include late speech from overlapping speakers.
 
 Each browser tab shares one authenticated event stream. Inline and floating chats share permission-checked transcript fetches and history, load only newer messages after initialization, and clear their store when the session becomes inaccessible or the last view closes. Transcript text remains outside SSE. Editor and admin routes load on demand. The measurements and validation are documented in [the performance review](docs/performance-review-2026-10-10.md).
+
+
+### Fun effects and trigger credit
+
+Admin → Fun has independent, instant toggles, initially off and stored persistently. Enabled sound effects reach signed-in browsers whose Discord account is in the bot’s active voice channel, regardless of who played the sound. Membership is checked at publication, delivery and display. The existing event stream uses server-measured elapsed time so device clock differences do not discard effects. Flashbang whites out the page after 600 ms and fades; Vine boom briefly zooms/shakes with The Rock centered in the viewport. The effects use protected sound IDs `2beec8ee6e7148f89e44770189b2b555` and `325a0351de6e4b27a6bc1a6799b05e2f`, respectively. These sounds cannot be deleted even when effects are disabled. Sounds with matching names do not activate effects. Browser previews do not activate effects. DVD screensaver is a separate silent visual toggle: its logo bounces and corner hits emit confetti. Reduced-motion preferences suppress shake, bouncing and confetti.
+
+Automatic Conversation and Actions playback credits the human participant who caused it, rather than the rule creator. Discord participants without app accounts appear in Hall of shame using their Discord identity and count toward plays. Creator permissions and channel authorization remain unchanged, and the audit details retain the creator ID. Historical attribution is not rewritten.
+
+
+DVD speed can be set from 0.25× to 5× beside its Fun switch; it applies without restarting the animation. SUS has its own default-off toggle and is bound to protected sound ID `c48f9c6f2bdf4cd99536f594c9ef2f1b`. It floats a red crewmate left to right for app viewers in the bot's voice channel, using the same broadcast and membership checks as Flashbang and Vine boom.
+
+Startup now resets Discord voice state before reconnecting to the reported channel or the persisted last successful connection. If Discord still reports the bot in voice, startup waits for its leave confirmation. Graceful shutdown preserves this reconnect target; using Disconnect clears it. Connection, guild/channel permissions, exclusions and bounded recovery still apply. Restart verification uses mocks and does not join a live voice channel.
+
+
+Goose and Kirby are independent, default-off Admin Fun settings. Goose wanders independently across the app, occasionally showing cursor interest, and hides on touch-only devices. Kirby counts authorized manual playback attempts, including capacity rejections, across each account’s devices: default 20 within 5 seconds, configurable from 1–100 attempts and 1–60 seconds. The threshold-reaching request pauses that account’s manual playback for five seconds and inhales its soundboard cards. Existing playback, previews, automatic triggers and other accounts are unaffected. Repeated requests do not extend the pause. Disabling Kirby clears pauses; restarting clears transient counters. Use account-filtered SSE and monotonic elapsed timing, bounded buffers, pointer-transparent visuals and reduced-motion behavior.
+
+
+## Frontend deployment updates
+
+Every Vite production build gets a unique ID embedded in its JavaScript and `frontend/dist/build.json`. Deploy the complete frontend output with its backend; keep that metadata with the build. Backend restarts reuse the same build ID. Rebuilding locally requires restarting the backend serving that output. Vite development mode does not show production update notices.
+
+HTML uses `Cache-Control: no-cache`. Only generated content-hashed assets listed in the build metadata receive `public, max-age=31536000, immutable`; other static assets are revalidated. Private APIs and media remain uncached.
+
+The existing authenticated SSE connection reports the serving build on every initial connection and reconnection. Existing state refreshes also compare IDs when returning to a visible tab. A mismatch shows one persistent, accessible update banner. Missing or malformed version information does not interrupt the app. The notice remains until reload; it never forces a reload or clears storage, cookies, preferences or sessions. Refresh keeps the current path, query and hash, and asks before discarding tracked unsaved editors, uploads or application settings. Finish active work before choosing to refresh.
+
+Tabs opened before this feature was deployed still need one manual refresh to install the version checking code. Keep the previous build's assets available if uninterrupted loading of previously unvisited lazy pages across deployments is required; the current stack replaces its build assets on deployment.
+
+The application server closes existing SSE streams when shutdown begins, allowing graceful bot/media cleanup and native EventSource reconnection after an app restart instead of holding shutdown open until Docker forcibly terminates it.
+
+Goose walks independently with alternating steps and body bobbing. Pointer movement never cancels committed antics or drawings. Cursor opportunities occur every random 20–40 seconds of visible, pointer-present time, wait for idle activities, and lead to a short investigation or a bounded 3–6 second chase after noticing and stalking. Nearby glances and recoils are debounced; leaving or losing focus cancels only cursor interactions. Hidden tabs pause behavior deadlines, drawing expiry and animations; reduced motion removes walking. Kirby enters from the right, visibly inhales cards, then leaves without an on-screen message or countdown. Repeated Flashbang, Vine boom and SUS plays create independent, bounded effect instances rather than replacing an active animation. Startup recovery captures Discord's reported voice channel before resetting it and rejoins that channel, even when the saved target differs.
+
+When a desktop cursor leaves the page, Goose immediately abandons its cursor target and wanders from its current position. Idle Goose occasionally hops or draws temporary red-pen scribbles; keep marks bounded, local and pointer-transparent. Kirby stops inhaling before leaving, and restored sound cards slide in from the right; reduced motion restores cards without movement.
+
+Goose doodles randomly selected smileys, self-portraits and Shrek line sketches using a shaded red pencil. Reveal each stroke sequentially and position the actual pencil tip at the same SVG path point; keep geometry cached and update the drawing directly rather than rendering React on each frame.
+
+Kirby ignores duplicate active-pause updates, keeps its animation age stable, and removes inhale wind before exiting. Goose keeps jump headroom, walks into drawing position and between separate strokes, draws sketches more slowly, and can leave a randomly generated five-second walking trail.
+
+Goose SVG overflow must stay visible so jumps are not clipped. Shrek uses green ink. Idle behaviors include temporarily borrowing and returning card emojis, inspecting buttons without activating them, tumbling by the playback bar, napping until playback, chasing an enabled DVD logo and fleeing on its bounce, and an egg that hatches into a short-lived follower. Restore borrowed DOM styles and remove props when interrupted, disabled or unmounted.
+
+Top sounds ranks all-time successful plays using durable per-sound/account/server counters. Audit cleanup does not reset rankings. Existing retained audit records initialize these counters once; previously deleted audit records cannot be recovered.
+
+Soundboard creator filtering uses a searchable multi-select between grid layout and sound search, combining with tags and text search across every section. Empty selection shows everyone; legacy sounds have an Unknown creator option.
+
+Goose selects weighted random idle activities from available targets, discouraging its last three choices. It blinks and uses suspicious, sleepy and curious expressions, with cautious stalking, emoji-carrying marching and sleepy waddling. Failed chases skid, look around and briefly pretend to inspect a nearby button, then return to wandering without bypassing cursor cooldowns. Drawing completion includes stepping back and a proud nod; occasional temporary cross-outs use the same pencil-tip/path alignment. Eligible SUS, Vine boom and Flashbang visuals may prompt a short silent reaction only when free; stale or committed-time reactions are discarded. Naps wake only for newly observed playback IDs, never recurring progress updates. Keep all timelines paused while hidden and restore borrowed elements and props on cleanup.
+
+Goose goslings follow through other activities with one shared 60–120-second visible-time deadline set at the first hatch. Later hatchlings inherit it; all leave together toward the nearest edge in a leader-following formation, with no hatching during departure. Broods favor one gosling (70%), then two (22%), three (7%) and four (1%), with at most four living followers. Hidden time pauses their lifetime; disabling Goose, touch-only capability or reduced motion removes them.
+
+Goose occasionally displays silent Honk Honk speech or an “Ik verlang naar m'n urn” thought bubble when unoccupied. Bubbles stay within the viewport and expire on visible time. Expired goslings walk to the nearest screen edge and leave completely before removal; disabling effects still cleans up immediately.
+
+Admin → Goose sends a trimmed 1–30-character silent message through the existing authenticated SSE connection to all currently connected clients. The five-second bubble follows a visible Goose, with a standalone mobile/disabled-Goose fallback. No voice membership or Goose toggle is required; messages are transient, plain text, bounded and never replayed after reconnect.
+
+Admin Goose also broadcasts a bounded five-goose raid, a chosen sketch drawn by the existing companion after its current activity, with a visiting-goose fallback, and sign delivery using the message field. All are silent, pointer-transparent and available to mobile/disabled-Goose clients; motion pauses while hidden and reduced motion uses static actors. Visiting raids and sign deliveries replace the prior visiting command; companion drawing requests replace only pending drawings. Sent speech contains no emoji. The automatic urn thought remains visible for ten seconds.
+
+
+Admin Goose includes a mouse/touch/pen drawing editor with six colours, Undo, Clear and named shared drawings. Saved drawings use the separate PostgreSQL `goose_sketches` settings key; authenticated clients read `/api/goose/sketches`, while admin-only create/update/delete APIs live under `/api/admin/goose/sketches`. Only bounded numerical coordinate arrays are accepted: at most 16 drawings, 60-character names, 32 strokes and 512 simplified points per drawing. Estimated ink and pencil-travel time must not exceed 60 seconds. Active drawing snapshots survive editing or deletion. Saved drawings also join the existing random idle sketch pool without increasing activity frequency.
+
+Manual draw broadcasts resolve saved IDs server-side and use the existing SSE connection. A visible desktop companion finishes its current activity, cursor interaction or drawing inspection, then walks to the new drawing. Each client keeps one pending request for up to 120 seconds of visible waiting time; newer requests replace only pending work. Playback timing starts on arrival. The companion stays afterward and goslings keep following. Without a visible companion, a temporary visiting goose draws; reduced motion shows static art. Complete drawing scenes, including pencil and goose, are randomly positioned inside the central 60% of both viewport dimensions, scaled for small screens and repositioned on resize without resetting stroke progress. Hidden tabs pause all behavior time. Enabled desktop companions load the library once, then refresh only after library changes or SSE reconnection, without adding a connection or polling. Unsaved drawing edits participate in the existing refresh warning.
+
+Browser preview volume stays local while dragging and saves only on pointer release, keyboard adjustment release or leaving the slider. Cancelling a pointer gesture discards its uncommitted value.

@@ -1,7 +1,8 @@
 export type ServerEmoji = { id: string; name: string; value: string; animated: boolean }
 export type Source = { id: string; url: string; title: string; duration: number; created_at: number; media_id?: string; captions?: { language: string; kind: string; status: string; error?: string }[] }
 export type CaptionMatch = { id: number; track_id: string; source_id: string; source_title: string; text: string; start: number; end: number; highlights?: number[][]; precision: 'word' | 'caption'; language: string; kind: string }
-export type Clip = { created_at?: number; play_count?: number; user_play_count?: number; pinned?: boolean; id: string; source_id: string | null; name: string; emoji: string; tags: string[]; start: number; end: number; volume: number; source_title: string; creator_id?: string | null; creator_name?: string | null; creator_avatar?: string | null }
+export type FunSettings = { flashbang: boolean; vine_boom: boolean; dvd: boolean; sus: boolean; dvd_speed: number; goose: boolean; kirby: boolean; kirby_threshold: number; kirby_window: number }
+export type Clip = { protected?: boolean; created_at?: number; play_count?: number; user_play_count?: number; pinned?: boolean; id: string; source_id: string | null; name: string; emoji: string; tags: string[]; start: number; end: number; volume: number; source_title: string; creator_id?: string | null; creator_name?: string | null; creator_avatar?: string | null }
 export type Job = { title?: string; details?: Record<string, unknown>; id: string; url: string; status: string; progress: number; error: string | null; source_id: string | null }
 export type Playback = { id: string; clip_id: string; name: string; started_at: number; position: number; duration: number }
 export type Preferences = { soundboard_mode?: 'default' | 'compact'; preview_volume: number; caption_language: 'all' | 'nl' | 'en' }
@@ -12,6 +13,8 @@ export let preferences: Preferences = { preview_volume: 0.8, caption_language: '
 export function setSession(user: User) { csrf = user.csrf; preferences = user.preferences }
 export class APIError extends Error { constructor(message: string, public status: number) { super(message) } }
 export type State = {
+  build_id?: string | null;
+  fun?: FunSettings; kirby_remaining_ms?: number;
   emojis?: ServerEmoji[]; user: User; guilds: {id: string; name: string}[];
   sources: Source[]; clips: Clip[]; jobs: Job[]; channel_imports: { id: string; url: string; title: string; status: string; error: string | null; total: number; counts: Record<string, number>; current: { title: string; url: string } | null }[];
   channels: { id: string; name: string; category: string | null }[];
@@ -31,4 +34,4 @@ export async function api<T = { ok: boolean }>(path: string, method = 'GET', bod
 }
 
 export const can = (user: User, permission: string) => Boolean(user.permissions?.[permission])
-export const canManageSound = (user: User, clip: Clip, action: 'edit' | 'delete') => can(user, `${action}_all_sounds`) || (clip.creator_id === user.id && can(user, `${action}_own_sounds`))
+export const canManageSound = (user: User, clip: Clip, action: 'edit' | 'delete') => !(action === 'delete' && clip.protected) && (can(user, `${action}_all_sounds`) || (clip.creator_id === user.id && can(user, `${action}_own_sounds`)))

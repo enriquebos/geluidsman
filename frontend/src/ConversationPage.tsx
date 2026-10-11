@@ -1,3 +1,4 @@
+import { useDraftWork } from './useUnsavedWork'
 import { liveEvents } from './liveEvents'
 import { ThemedSelect } from './ThemedSelect'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -26,6 +27,7 @@ export function ConversationPage({ user, clips, onError, onNotify }: { user: Use
   const [draft, setDraft] = useState<TriggerDraft | null>(null)
   const triggerDialog = useDialogEscape(() => setDraft(null), Boolean(draft))
   const [busy, setBusy] = useState(false)
+  useDraftWork(draft, busy)
   const [deletion, setDeletion] = useState<{ id: string } | null>(null)
   const [deleting, setDeleting] = useState(false)
   const deleteDialog = useDialogEscape(() => { if (!deleting) setDeletion(null) }, Boolean(deletion))

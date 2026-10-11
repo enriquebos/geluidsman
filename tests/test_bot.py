@@ -260,12 +260,18 @@ def test_status_connected_users_excludes_bots(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("present", [True, False])
-def test_startup_recovers_only_discord_reported_voice_once(tmp_path: Path, *, present: bool) -> None:
+def test_startup_resets_discord_reported_voice_once(tmp_path: Path, *, present: bool) -> None:
     async def scenario() -> None:
         db = Database(tmp_path / "startup.sqlite3")
         bot = Bot(Settings(_env_file=None, discord_token=SecretStr(""), data_dir=tmp_path), db, Events())
         voice_state = Mock(channel=Mock(id=123), self_mute=True, self_deaf=True, deaf=False) if present else None
-        guild = Mock(voice_client=None, me=Mock(voice=voice_state))
+        guild = Mock(
+            id=bot.settings.discord_guild_id,
+            voice_client=None,
+            me=Mock(voice=voice_state),
+            change_voice_state=AsyncMock(),
+        )
+        bot.client.wait_for = AsyncMock()
         bot.client.get_guild = lambda _: guild
         bot.state.connect = AsyncMock()
         db.set_setting(f"guild:{bot.settings.discord_guild_id}:selected_channel_id", "456")
@@ -419,6 +425,80 @@ def test_handshake_timeout_cleans_up_and_retains_retry_target(tmp_path: Path) ->
         assert bot.state.mixer is None
         await bot.state.disconnect()
         assert bot.state.desired_channel_id is None
+        await bot.close()
+        db.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_saved_restart_target_resets_before_connect_and_manual_disconnect_clears(
+    tmp_path: Path, *, failure: bool
+) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "resume.sqlite3")
+        settings = Settings(_env_file=None, discord_token=SecretStr(""), data_dir=tmp_path)
+        key = f"guild:{settings.discord_guild_id}:resume_channel_id"
+        db.set_setting(key, "123")
+        bot = Bot(settings, db, Events())
+        guild = Mock(id=settings.discord_guild_id, voice_client=None, me=Mock(voice=None))
+        order = []
+
+        async def reset(*, channel: None) -> None:
+            assert channel is None
+            order.append("disconnect")
+            if failure:
+                raise TimeoutError
+
+        async def connect(channel: str) -> None:
+            assert channel == "123"
+            order.append("connect")
+
+        guild.change_voice_state = reset
+        bot.client.get_guild = lambda _: guild
+        bot.state.connect = connect
+        await bot.recover_startup_voice()
+        assert order == (["disconnect"] if failure else ["disconnect", "connect"])
+        if failure:
+            assert bot.state.desired_channel_id == "123"
+        await bot.close()
+        assert db.setting(key) == "123"
+        bot = Bot(settings, db, Events())
+        await bot.state.disconnect()
+        assert db.setting(key) is None
+        await bot.close()
+        db.close()
+
+    asyncio.run(scenario())
+
+
+def test_startup_waits_for_reported_disconnect_before_reconnect(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "confirm.sqlite3")
+        bot = Bot(Settings(_env_file=None, discord_token=SecretStr(""), data_dir=tmp_path), db, Events())
+        confirmed = asyncio.Event()
+        db.set_setting(f"guild:{bot.settings.discord_guild_id}:resume_channel_id", "456")
+        guild = Mock(
+            id=bot.settings.discord_guild_id,
+            voice_client=None,
+            me=Mock(voice=Mock(channel=Mock(id=123), self_mute=False, self_deaf=False, deaf=False)),
+        )
+
+        async def wait(_event: str, **_options: object) -> None:
+            await confirmed.wait()
+
+        guild.change_voice_state = AsyncMock()
+        bot.client.wait_for = wait
+        bot.client.get_guild = lambda _: guild
+        bot.state.connect = AsyncMock()
+        task = asyncio.create_task(bot.recover_startup_voice())
+        await asyncio.sleep(0.01)
+        guild.change_voice_state.assert_awaited_once_with(channel=None)
+        bot.state.connect.assert_not_awaited()
+        guild.me.voice = None
+        confirmed.set()
+        await task
+        bot.state.connect.assert_awaited_once_with("123")
         await bot.close()
         db.close()
 

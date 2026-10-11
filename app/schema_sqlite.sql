@@ -138,3 +138,15 @@ BEGIN
 UPDATE conversation_messages SET received_order=NEW.rowid WHERE id=NEW.id;
 END;
 CREATE INDEX IF NOT EXISTS conversation_messages_received ON conversation_messages(session_id,received_order);
+
+CREATE TABLE IF NOT EXISTS sound_play_totals (
+    resource_id TEXT NOT NULL, actor_id TEXT NOT NULL, guild_id TEXT NOT NULL,
+    played BIGINT NOT NULL DEFAULT 0, PRIMARY KEY(resource_id,actor_id,guild_id)
+);
+INSERT INTO sound_play_totals(resource_id,actor_id,guild_id,played)
+SELECT resource_id,COALESCE(actor_id,''),COALESCE(guild_id,'1352422295402057759'),COUNT(*)
+FROM audit WHERE action='sound.play' AND outcome='success' AND resource_id IS NOT NULL
+AND NOT EXISTS (SELECT 1 FROM settings WHERE key='sound_play_totals_initialized')
+GROUP BY resource_id,COALESCE(actor_id,''),COALESCE(guild_id,'1352422295402057759')
+ON CONFLICT(resource_id,actor_id,guild_id) DO NOTHING;
+INSERT INTO settings(key,value) VALUES ('sound_play_totals_initialized','true') ON CONFLICT(key) DO NOTHING;

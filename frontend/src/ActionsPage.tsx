@@ -1,3 +1,4 @@
+import { useDraftWork } from './useUnsavedWork'
 import { liveEvents } from './liveEvents'
 import { ThemedSelect } from './ThemedSelect'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -23,6 +24,7 @@ export function ActionsPage({ user, clips, onError, onNotify }: { user: User; cl
   const [draft, setDraft] = useState<Rule | null>(null)
   const [deleting, setDeleting] = useState<Rule | null>(null)
   const [busy, setBusy] = useState(false)
+  useDraftWork(draft, busy)
   const alive = useRef(true)
   const sequence = useRef(0)
   const changing = useRef(new Map<string, boolean>())

@@ -5,6 +5,7 @@ test('toast stays below the visible connection bar and moves up when it scrolls 
   try {
     await page.goto('/settings')
     await page.getByLabel('Browser preview volume').fill('0.57')
+  await page.getByLabel('Browser preview volume').blur()
     const toast = page.locator('.toast')
     await expect(toast).toContainText('Preferences saved.')
     const header = page.getByRole('banner', { name: 'Discord connection' })

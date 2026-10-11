@@ -1,3 +1,4 @@
+import { useUnsavedWork } from './useUnsavedWork'
 import { ClipVolume } from './ClipVolume'
 import { useEffect, useRef, useState } from 'react'
 import { Headphones, LoaderCircle, Upload, X } from 'lucide-react'
@@ -13,6 +14,7 @@ export function SoundUpload({ boosted, serverEmojis, tags: availableTags, maxSec
   const [tags, setTags] = useState<string[]>([])
   const [volume, setVolume] = useState(1)
   const [busy, setBusy] = useState(false)
+  useUnsavedWork(busy || Boolean(file || name || emoji || tags.length || volume !== 1))
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState('')
   const [preview, setPreview] = useState('')

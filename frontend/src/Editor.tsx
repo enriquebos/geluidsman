@@ -1,3 +1,4 @@
+import { useUnsavedWork } from './useUnsavedWork'
 import { useEffect, useRef, useState } from 'react'
 import WaveSurfer from 'wavesurfer.js'
 import { ArrowLeft, Check, Pause, Play, Scissors, ZoomIn, ZoomOut } from 'lucide-react'
@@ -28,6 +29,7 @@ export function Editor({ serverEmojis, canCreate, source, initialTime = 0, avail
   const [emoji, setEmoji] = useState('')
   const [tags, setTags] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
+  useUnsavedWork(saving || Boolean(name || emoji || tags.length) || selection.start !== 0 || selection.end !== Math.min(10, source.duration))
 
   function update(value: Selection) {
     const next = { start: Math.max(0, Math.min(value.start, source.duration - 0.1)), end: Math.min(source.duration, Math.max(value.end, value.start + 0.1)) }

@@ -145,6 +145,13 @@ def test_conversation_outside_creator_and_eligibility(tmp_path: Path, failure: s
             db.execute("UPDATE conversation_triggers SET enabled=0")
         await task
         assert bool(value.bot.state.play.call_count) is (not failure)
+        if not failure:
+            for action in ("sound.play", "trigger.play"):
+                entry = db.one("SELECT * FROM audit WHERE action=?", (action,))
+                assert entry["actor_id"] == "200"
+                assert entry["actor_name"] == "Participant"
+                assert json.loads(entry["details"])["creator_id"] == "100"
+            assert db.one("SELECT played FROM activity_totals WHERE actor_id='200'")["played"] == 1
         await value.close_session()
         db.close()
 

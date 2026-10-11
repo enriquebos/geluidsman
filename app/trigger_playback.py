@@ -112,7 +112,7 @@ class TriggerPlayback:
         return clip, reason
 
     async def execute(self, trigger: dict, context: PlaybackContext) -> None:
-        details = context.details
+        details = {**context.details, "creator_id": trigger["owner_id"]}
         stopping = trigger.get("action", "play") == "stop_all"
         clip = None
         reason, instance = None, None
@@ -124,7 +124,7 @@ class TriggerPlayback:
                         self.bot.state.mixer.stop()
                     await self.db.run(
                         self.db.audit,
-                        trigger["owner_id"],
+                        context.participant_id,
                         "sound.stop_all",
                         guild_id=str(self.settings.discord_guild_id),
                         details=details,
@@ -137,7 +137,7 @@ class TriggerPlayback:
         if instance:
             await self.db.run(
                 self.db.audit,
-                trigger["owner_id"],
+                context.participant_id,
                 "sound.play",
                 clip["id"],
                 clip["name"],
@@ -148,7 +148,7 @@ class TriggerPlayback:
             details = {**details, "reason": reason}
         await self.db.run(
             self.db.audit,
-            trigger["owner_id"],
+            context.participant_id,
             "action_trigger.fire" if context.namespace == "actions" else "trigger.play",
             trigger["id"],
             "Stop all sounds" if stopping else clip["name"] if clip else "Deleted sound",

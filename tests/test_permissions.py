@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from app.db import Database
+from app.fun import FunSettings, KirbyGuard
 from app.permissions import DEFAULTS, effective_permissions
 from tests.test_auth import GUILD, headers, login
 from tests.test_auth import client as auth_fixture
@@ -323,7 +324,13 @@ def test_playback_requires_voice_presence_or_explicit_permission(
     seed(client.app.state.db)
     override(client, {"play_outside_voice": outside, "play_sounds": play})
     channel = SimpleNamespace(members=[SimpleNamespace(id=100)] if present else [])
-    state = SimpleNamespace(voice=SimpleNamespace(channel=channel), play=Mock(return_value="instance"), status=dict)
+    state = SimpleNamespace(
+        voice=SimpleNamespace(channel=channel, is_connected=lambda: True),
+        play=Mock(return_value="instance"),
+        status=dict,
+        kirby=KirbyGuard(),
+        fun_settings=FunSettings().model_dump(),
+    )
     monkeypatch.setattr("app.main.voice_target", AsyncMock(return_value=state))
     response = client.post(f"/api/guilds/{GUILD}/clips/sound/play", headers=headers(user))
     assert response.status_code == status

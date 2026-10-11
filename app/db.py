@@ -14,6 +14,7 @@ import anyio
 import psycopg
 
 from app.caption_matching import caption_match, search_tokens
+from app.fun import SOUND_EFFECTS
 from app.import_errors import import_guidance
 from app.postgres import Connection
 
@@ -117,6 +118,7 @@ class Database:
     ) -> None:
         actor = self.one("SELECT display_name FROM users WHERE id=?", (actor_id,)) if actor_id else None
         details = dict(details or {})
+        actor_name = actor["display_name"] if actor else details.get("speaker_name") or actor_id or "System"
         if action.startswith("sound.") and resource_id:
             clip = self.one("SELECT emoji FROM clips WHERE id=?", (resource_id,))
             if clip:
@@ -135,7 +137,7 @@ class Database:
             (
                 time.time(),
                 actor_id,
-                actor["display_name"] if actor else "System",
+                actor_name,
                 action,
                 resource_id,
                 name,
@@ -144,6 +146,13 @@ class Database:
                 json.dumps(details),
             ),
         )
+
+        if action == "sound.play" and outcome == "success" and resource_id:
+            self.conn.execute(
+                "INSERT INTO sound_play_totals(resource_id,actor_id,guild_id,played) VALUES (?,?,?,1) "
+                "ON CONFLICT(resource_id,actor_id,guild_id) DO UPDATE SET played=sound_play_totals.played+1",
+                (resource_id, actor_id or "", guild_id or "1352422295402057759"),
+            )
 
         if (
             actor_id
@@ -157,7 +166,7 @@ class Database:
                 "created=activity_totals.created+excluded.created,played=activity_totals.played+excluded.played",
                 (
                     actor_id,
-                    actor["display_name"] if actor else "Unknown user",
+                    actor_name,
                     int(action == "sound.create"),
                     int(action == "sound.play"),
                 ),
@@ -310,9 +319,9 @@ class Database:
         counts = {
             item["resource_id"]: item
             for item in self.rows(
-                "SELECT resource_id, COUNT(*) AS play_count, "
-                "SUM(CASE WHEN actor_id=? THEN 1 ELSE 0 END) AS user_play_count "
-                "FROM audit WHERE action='sound.play' AND outcome='success' AND guild_id=? "
+                "SELECT resource_id, SUM(played) AS play_count, "
+                "SUM(CASE WHEN actor_id=? THEN played ELSE 0 END) AS user_play_count "
+                "FROM sound_play_totals WHERE guild_id=? "
                 "GROUP BY resource_id",
                 (user_id, guild_id),
             )
@@ -322,6 +331,7 @@ class Database:
             row["play_count"] = usage.get("play_count", 0)
             row["user_play_count"] = usage.get("user_play_count", 0)
             row["pinned"] = row["id"] in pinned
+            row["protected"] = row["id"] in SOUND_EFFECTS
             row["tags"] = json.loads(row["tags"])
         return rows
 

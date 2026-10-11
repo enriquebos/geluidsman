@@ -500,6 +500,7 @@ class Conversation:
                 {
                     "trigger_id": trigger["id"],
                     "speaker_id": speech.speaker_id,
+                    "speaker_name": speech.name,
                     "action": trigger.get("action", "play"),
                     "delay": trigger.get("delay", 0),
                 },

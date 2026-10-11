@@ -1,8 +1,13 @@
+import { FrontendUpdateNotice } from './FrontendUpdateNotice'
+import { observeFrontendBuild, observeBuildEvent } from './frontendBuild'
+import { useDraftWork, useUnsavedWork } from './useUnsavedWork'
+import { FunEffects } from './FunEffects'
 import { liveEvents } from './liveEvents'
 import { PlaybackChips } from './PlaybackChips'
 import { useDialogActions } from './useDialogActions'
 import { ThemedSelect } from './ThemedSelect'
 import { ClipVolume } from './ClipVolume'
+import { SearchSelect } from './SearchSelect'
 import { Soundboard, SoundboardGridControl } from './Soundboard'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Trophy, LogOut, Zap, Mic, MicOff, HeadphoneOff, Unplug, Shield, AudioLines, ChevronRight, Disc3, Headphones, LayoutGrid, Library, Link, LoaderCircle, Play, Plus, Radio, Search, Settings2, Square, Trash2, Volume2, X } from 'lucide-react'
@@ -36,6 +41,10 @@ function readRoute(): Route {
 
 export function App() {
   useDialogActions()
+  return <><FrontendUpdateNotice /><SessionApp /></>
+}
+
+function SessionApp() {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -62,12 +71,15 @@ function Dashboard({ user, onUser, onLogout }: { user: User; onUser: (user: User
   const page = route.page
   const [search, setSearch] = useState('')
   const [tag, setTag] = useState('All sounds')
+  const [creators, setCreators] = useState<string[]>([])
   const [url, setUrl] = useState('')
   const [importing, setImporting] = useState(false)
   const source = state?.sources.find(item => item.id === route.sourceId) || null
   const initialTime = Math.min(route.time, source?.duration ?? route.time)
   const [upload, setUpload] = useState(false)
   const [edit, setEdit] = useState<Clip | null>(null)
+  useDraftWork(edit)
+  useUnsavedWork(importing || Boolean(url.trim()))
   const [confirm, setConfirm] = useState<{ title: string; description?: string; action: () => Promise<void> } | null>(null)
   const [message, setMessage] = useState<{ text: string; error: boolean; id: number } | null>(null)
   const guild = '1352422295402057759'
@@ -147,6 +159,7 @@ function Dashboard({ user, onUser, onLogout }: { user: User; onUser: (user: User
     const pinSnapshot = pinSequence.current
     try {
       const next = await api<State>('/state')
+      observeFrontendBuild(next.build_id)
       if (!initialStateReceived.current) {
         previousCompletedBatches.current = new Set((next.channel_imports ?? []).filter(batch => batch.status === 'complete' && !batch.error && !batch.counts.failed).map(batch => batch.id))
         initialStateReceived.current = true
@@ -173,6 +186,7 @@ function Dashboard({ user, onUser, onLogout }: { user: User; onUser: (user: User
   useEffect(() => {
     void refresh()
     const events = liveEvents()
+    events.addEventListener('refresh', observeBuildEvent)
     for (const type of ['refresh', 'library']) events.addEventListener(type, () => { if (!document.hidden) void refresh() })
     events.addEventListener('permissions', event => {
       const change = JSON.parse((event as MessageEvent).data) as { user_id: string }
@@ -308,10 +322,11 @@ function Dashboard({ user, onUser, onLogout }: { user: User; onUser: (user: User
   const voicePath = `/guilds/${guild}`
   const clips = state?.clips ?? []
   const tags = useMemo(() => ['All sounds', ...Array.from(new Set(clips.flatMap(c => c.tags))).slice(0, 12)], [clips])
+  const creatorOptions = useMemo(() => Array.from(new Map(clips.map(clip => [clip.creator_id || 'legacy', { id: clip.creator_id || 'legacy', name: clip.creator_name || 'Unknown creator', avatar: clip.creator_avatar }])).values()).sort((a, b) => a.name.localeCompare(b.name)), [clips])
   const visibleClips = useMemo(() => {
     const query = search.toLowerCase()
-    return clips.filter(c => (tag === 'All sounds' || c.tags.includes(tag)) && `${c.name} ${c.tags.join(' ')} ${c.source_title}`.toLowerCase().includes(query)).sort((a, b) => (b.created_at || 0) - (a.created_at || 0) || a.id.localeCompare(b.id))
-  }, [clips, search, tag])
+    return clips.filter(c => (!creators.length || creators.includes(c.creator_id || 'legacy')) && (tag === 'All sounds' || c.tags.includes(tag)) && `${c.name} ${c.tags.join(' ')} ${c.source_title}`.toLowerCase().includes(query)).sort((a, b) => (b.created_at || 0) - (a.created_at || 0) || a.id.localeCompare(b.id))
+  }, [clips, search, tag, creators])
   const [collectionPage, setCollectionPage] = useState(1)
   useEffect(() => setCollectionPage(1), [search])
   const sources = useMemo(() => {
@@ -332,7 +347,7 @@ function Dashboard({ user, onUser, onLogout }: { user: User; onUser: (user: User
   const connectionDetail = connectionState === 'connecting' ? 'Joining the voice channel…' : connectionState === 'reconnecting' ? 'Voice connection interrupted. Retrying…' : connectionState === 'disconnected' ? 'Choose a voice channel to connect.' : [state?.status.muted ? 'Muted' : '', state?.status.deafened ? 'Deafened' : ''].filter(Boolean).join(' · ') || (state?.status.playbacks.length ? `${state.status.playbacks.length} ${state.status.playbacks.length === 1 ? 'sound' : 'sounds'} playing` : 'No sounds playing')
   const connectionAppearance = ['connecting', 'reconnecting'].includes(connectionState) || state?.status.muted ? 'attention' : connectionState === 'connected' ? 'connected' : 'disconnected'
 
-  return <div className="app-shell">
+  return <div className="app-shell"><FunEffects remaining={state?.kirby_remaining_ms} initial={state?.fun} userId={user.id} status={state?.status} />
     <aside className="sidebar"><a href="/soundboard" className="brand"><span className="brand-icon"><AudioLines size={23} /></span><span>Geluidsman<span className="brand-subtitle">A LITTLE LOUDER.</span></span></a><nav aria-label="Main navigation"><div className="nav-group" role="group" aria-label="Play"><h3>Play</h3><button className={page === 'board' ? 'active' : ''} onClick={() => changePage('board')}><LayoutGrid size={19} /> Soundboard <span className="nav-count">{clips.length}</span></button>{can(user, 'view_conversations') && <button className={page === 'conversation' ? 'active' : ''} onClick={() => changePage('conversation')}><AudioLines size={19} />Conversation<span className="nav-beta" aria-hidden="true">BETA</span></button>}{can(user, 'view_actions') && <button className={page === 'actions' ? 'active' : ''} onClick={() => changePage('actions')}><Zap size={19} />Actions</button>}</div><div className="nav-group" role="group" aria-label="Create"><h3>Create</h3><button className={page === 'library' ? 'active' : ''} onClick={() => changePage('library')}><Library size={19} /> Video library <span className="nav-count">{state?.sources.length ?? 0}</span></button></div><div className="nav-group" role="group" aria-label="Manage"><h3>Manage</h3>{can(user, 'view_audit') && <button className={page === 'audit' ? 'active' : ''} onClick={() => changePage('audit')}><Search size={19} /> Audit log</button>}{can(user, 'view_audit') && <button className={page === 'hall' ? 'active' : ''} onClick={() => changePage('hall')}><Trophy size={19} /> Hall of shame</button>}<button className={page === 'settings' ? 'active' : ''} onClick={() => changePage('settings')}><Settings2 size={19} /> Settings</button>{user.admin && <button className={page === 'admin' ? 'active' : ''} onClick={() => changePage('admin')}><Shield size={19} /> Admin</button>}</div></nav><section className="sidebar-members" aria-label="Connected users">{state?.status.connected && <p className="sidebar-voice-channel" title={state.status.channel_name || undefined}><Radio size={14} /><span>{state.status.channel_name}</span></p>}<h3 title={state?.status.connected ? "Connected users" : "Bot is not in a voice channel"}><span className="sidebar-members-label">{state?.status.connected ? 'Connected users' : 'Bot is not in a channel'}</span><i className={`status-dot sidebar-members-indicator ${state?.status.connected ? 'online' : ''}`} aria-hidden="true" /><span className="sidebar-members-count">{state?.status.participants?.length || 0}</span></h3><div>{state?.status.participants?.map(person => <div className="sidebar-member" key={person.id}>{person.avatar ? <img src={person.avatar} alt="" /> : <span className="member-avatar">{person.name.slice(0, 1).toUpperCase()}</span>}<span>{person.name}</span></div>)}{!state?.status.participants?.length && <p>{state?.status.connected ? 'No one in the bot’s voice channel.' : 'Connect the bot to see users here.'}</p>}</div></section><div className="sidebar-bottom"><span className="account-label">{user.avatar && <img src={user.avatar} alt="" />}<span>{user.display_name}</span></span><button className="icon-button" aria-label="Log out" title="Log out" onClick={() => void logout()}><LogOut size={18} /></button></div></aside>
     <div className="main-shell"><header className="topbar connection-bar" aria-label="Discord connection"><div className={`connection-icon ${connectionAppearance}`}><Radio size={22} /></div><div className="connection-title"><strong>{connectionLabel}</strong><span>{connectionDetail}</span></div><div className="connection-actions">{can(user, 'connect_voice') && <ThemedSelect aria-label="Voice channel" value={channel} onChange={selected => setChannel(selected)} disabled={!state?.status.bot_ready}><option value="">Select voice channel</option>{state?.channels.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</ThemedSelect>}{can(user, 'connect_voice') && <button className="secondary-button" disabled={!channel || !state?.status.bot_ready || connecting} onClick={async () => { setConnecting(true); await action(`${voicePath}/voice/connect`, 'POST', { channel_id: channel }); setConnecting(false) }}>{connecting ? <LoaderCircle className="spin" size={16} /> : <Link size={16} />}{state?.status.connected ? 'Move / reconnect' : 'Connect'}</button>}{state?.status.connected && can(user, 'disconnect_voice') && <button className="icon-button" title="Disconnect" aria-label="Disconnect bot" onClick={() => void action(`${voicePath}/voice/disconnect`)}><Unplug size={18} /></button>}</div></header>
       <main><div className="page-heading"><div><div className="eyebrow">{page === 'board' ? 'SET THE MOOD' : page === 'library' ? 'COLLECT VIDEOS. CREATE SOUNDS.' : page === 'settings' ? 'YOUR PREFERENCES' : page === 'admin' ? 'APPLICATION OPERATIONS' : page === 'actions' ? 'VOICE AUTOMATION' : page === 'conversation' ? 'LIVE CONVERSATION' : 'SOUNDBOARD ACTIVITY'}</div><h1>{page === 'board' ? 'Your soundboard' : pageTitle}<span className="heading-dot">.</span></h1><p>{page === 'board' ? 'The right sound. At exactly the wrong moment.' : page === 'library' ? 'Bring a video. Keep the moments worth replaying.' : page === 'settings' ? 'Make the soundboard feel like yours.' : page === 'admin' ? 'Settings and diagnostics for your application.' : page === 'actions' ? 'Turn voice events into sound.' : page === 'conversation' ? 'Live speech. Shared sounds.' : page === 'hall' ? 'The people behind the noise.' : 'Who did what. And when.'}</p></div>{page === 'board' && can(user, 'create_sounds') && <button className="primary-button" onClick={() => setUpload(true)}><Plus size={18} /> Add a sound</button>}</div>
@@ -340,7 +355,7 @@ function Dashboard({ user, onUser, onLogout }: { user: User; onUser: (user: User
       {state?.status.error && <div className="notice"><Settings2 size={17} />{state.status.error}</div>}
       {!!state?.missing_dependencies.length && <div className="notice error">Missing media tools: {state.missing_dependencies.join(', ')}. Run setup and restart.</div>}
       {!state ? <div className="empty-state"><LoaderCircle className="spin" size={30} /><h2>Getting things ready…</h2><p>Connecting to your soundboard.</p></div> : page === 'actions' ? can(user, 'view_actions') ? <ActionsPage user={user} clips={clips} onError={onError} onNotify={notify} /> : <section className="empty-state"><h2>Actions access required</h2></section> : page === 'conversation' ? can(user, 'view_conversations') ? <ConversationPage user={user} clips={clips} onError={onError} onNotify={notify} /> : <section className="empty-state"><h2>Conversation access required</h2></section> : page === 'settings' ? <SettingsPage user={user} onUser={onUser} onError={onError} onNotify={notify} /> : page === 'admin' ? user.admin ? <Suspense fallback={<section className="settings-panel" role="status">Loading admin tools…</section>}><AdminPage user={user} onError={onError} onNotify={notify} /></Suspense> : <section className="empty-state"><Shield size={32} /><h2>Admin access required</h2><p>Ask an administrator to grant admin panel access.</p></section> : (page === 'audit' || page === 'hall') ? can(user, 'view_audit') ? page === 'hall' ? <ActivityStats onError={onError} /> : <AuditPage onError={onError} /> : <section className="empty-state"><Shield size={32} /><h2>Audit access required</h2><p>You do not have permission to view activity.</p></section> : page === 'board' ? <>
-        <div className="board-toolbar"><span className="soundboard-count">{clips.length} {clips.length === 1 ? 'sound' : 'sounds'}</span><div className="soundboard-search-tools"><SoundboardGridControl mode={user.preferences.soundboard_mode || 'default'} onMode={changeBoardMode} /><label className="search"><Search size={17} /><input aria-label="Search sounds" placeholder="Search sounds…" value={search} onChange={e => setSearch(e.target.value)} /><kbd>/</kbd></label></div></div>
+        <div className="board-toolbar"><span className="soundboard-count">{clips.length} {clips.length === 1 ? 'sound' : 'sounds'}</span><div className="soundboard-search-tools"><SoundboardGridControl mode={user.preferences.soundboard_mode || 'default'} onMode={changeBoardMode} /><div className="creator-filter"><SearchSelect label="Filter creators" hideLabel value="" values={creators} options={creatorOptions} placeholder="All creators" onChange={() => setCreators([])} onToggle={id => setCreators(previous => !id ? [] : previous.includes(id) ? previous.filter(value => value !== id) : [...previous, id])} /></div><label className="search"><Search size={17} /><input aria-label="Search sounds" placeholder="Search sounds…" value={search} onChange={e => setSearch(e.target.value)} /><kbd>/</kbd></label></div></div>
         <div className="board-controls"><div className="tag-list">{tags.map(value => <button key={value} className={tag === value ? 'tag selected' : 'tag'} onClick={() => setTag(value)}>{value}</button>)}</div><span className="play-hint"><Headphones size={14} /> Preview here. Play in Discord.</span></div>
         <Soundboard clips={visibleClips} user={user} connected={state.status.connected} playing={new Set(state.status.playbacks.map(value => value.clip_id))} pending={pendingClips} preview={preview} onPin={pinSound} onPlay={playSound} onPreview={browserPreview} onEdit={clip => setEdit({ ...clip, volume: Math.min(clip.volume, can(user, 'high_volume') ? 10 : 3), tags: [...clip.tags] })} />
       </> : route.missing || (route.sourceId && !source) ? <section className="empty-state"><h2>{route.sourceId ? 'Video not found' : 'Page not found'}</h2><p>This link is unavailable. The video may have been deleted.</p><button className="secondary-button" onClick={() => changePage('library')}>Back to library</button></section> : source ? <Suspense fallback={<section className="settings-panel" role="status">Loading sound editor…</section>}><Editor serverEmojis={state.emojis} canCreate={can(user, 'create_sounds')} key={`${source.id}-${source.media_id}-${initialTime}`} source={source} initialTime={initialTime} availableTags={Array.from(new Set(clips.flatMap(clip => clip.tags)))} maxLength={can(user, 'long_sounds') ? 600 : state.limits.max_clip_seconds} onClose={() => changePage('library')} onError={onError} onSaved={() => { changePage('board'); void refresh(); notify('Sound added. Let’s hear it.'); }} /></Suspense> : <>

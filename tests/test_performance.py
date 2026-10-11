@@ -102,6 +102,7 @@ def test_queued_extraction_rechecks_source(tmp_path: Path, monkeypatch: pytest.M
         return b""
 
     monkeypatch.setattr("app.media.process", process)
+    monkeypatch.setattr(media, "normalize_clip_audio", AsyncMock())
 
     async def check() -> None:
         await media.lock.acquire()

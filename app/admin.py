@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import time
+import uuid
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from app.auth import authorize_admin
+from app.fun import FunSettings, GooseAction, GooseMessage
+from app.goose_sketches import register_sketch_routes, resolve_sketch
 from app.permissions import CATALOGUE, DEFAULTS, effective_permissions
 
 if TYPE_CHECKING:
@@ -69,7 +73,49 @@ def update_permissions(app: FastAPI, request: Request, user_id: str, overrides: 
 
 
 def register_admin_routes(app: FastAPI) -> None:
+    register_sketch_routes(app)
     options = {"dependencies": [Depends(authorize_admin)]}
+
+    @app.get("/api/admin/fun", **options)
+    async def fun_settings() -> dict:
+        return FunSettings.model_validate(app.state.bot.state.fun_settings).model_dump()
+
+    @app.put("/api/admin/fun", **options)
+    async def save_fun(body: FunSettings, request: Request) -> dict:
+        values = body.model_dump()
+        await app.state.db.run(app.state.db.set_setting, "fun_settings", values)
+        app.state.bot.state.fun_settings = values
+        if not values["kirby"]:
+            app.state.bot.state.kirby.clear()
+        await app.state.db.run(app.state.db.audit, request.state.user["id"], "fun.update", details=values)
+        app.state.events.publish("fun.settings", values)
+        app.state.events.publish("audit")
+        return values
+
+    @app.post("/api/admin/goose/message", **options)
+    async def goose_message(body: GooseMessage) -> dict:
+        app.state.events.publish(
+            "fun.goose",
+            {"instance_id": uuid.uuid4().hex, "text": body.text, "emitted_at": time.monotonic()},
+        )
+        return {"sent": True}
+
+    @app.post("/api/admin/goose/action", **options)
+    async def goose_action(body: GooseAction) -> dict:
+        drawing = await app.state.db.run(
+            resolve_sketch, app.state.db, body.sketch_id if body.action == "draw" else None
+        )
+        app.state.events.publish(
+            "fun.goose",
+            {
+                **body.model_dump(),
+                "drawing": drawing,
+                "instance_id": uuid.uuid4().hex,
+                "emitted_at": time.monotonic(),
+                "duration_ms": {"raid": 10000, "draw": 30000, "deliver": 12000}[body.action],
+            },
+        )
+        return {"sent": True}
 
     @app.get("/api/admin/permissions", **options)
     async def catalogue() -> dict:

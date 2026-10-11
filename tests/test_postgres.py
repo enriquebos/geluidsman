@@ -12,6 +12,7 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.db import Database
+from app.goose_sketches import Sketch, change_library, resolve_sketch
 from app.main import create_app
 from app.postgres import Connection
 from tests.helpers import authenticated_fixture
@@ -30,7 +31,9 @@ def database(tmp_path: Path) -> Iterator[Database]:
     assert urlsplit(URL).path == "/geluidsman_test"
     connection = Connection(URL)
     connection.initialize()
-    connection.raw.execute("TRUNCATE users,sources,settings,oauth_states,audit,channel_batches,activity_totals CASCADE")
+    connection.raw.execute(
+        "TRUNCATE users,sources,settings,oauth_states,audit,channel_batches,activity_totals,sound_play_totals CASCADE"
+    )
     connection.close()
     db = Database(tmp_path / "unused.sqlite3", URL)
     yield db
@@ -162,3 +165,31 @@ def test_postgres_action_rules_persistence_and_audit(database: Database) -> None
     assert not database.one("SELECT enabled FROM action_triggers WHERE id='voice-rule'")["enabled"]
     database.execute("DELETE FROM action_triggers WHERE id='voice-rule'")
     assert not database.rows("SELECT * FROM action_triggers")
+
+
+def test_postgres_sound_rankings_survive_retention(database: Database) -> None:
+    database.execute(
+        "INSERT INTO clips(id,source_id,name,emoji,tags,start,end,volume,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ("ranked", None, "Ranked", "", "[]", 0, 1, 1, time.time()),
+    )
+    for actor in ("100", "100", "200"):
+        database.audit(actor, "sound.play", "ranked", guild_id="1352422295402057759")
+    database.audit("100", "sound.play", "ranked", outcome="rejected", guild_id="1352422295402057759")
+    database.audit("100", "sound.play", "ranked", guild_id="999")
+    database.execute("DELETE FROM audit")
+    database.conn.initialize()
+    ranked = database.clips("100", "1352422295402057759")[0]
+    assert ranked["play_count"] == 3
+    assert ranked["user_play_count"] == 2
+
+
+def test_postgres_shared_goose_library_preserves_settings(database: Database) -> None:
+    database.set_setting("fun_settings", {"goose": True})
+    body = Sketch.model_validate({"name": "Goose", "strokes": [{"color": "#ef3340", "points": [[0, 0], [150, 130]]}]})
+    saved = change_library(database, body)
+    assert resolve_sketch(database, saved["id"]) == saved
+    updated = change_library(database, body.model_copy(update={"name": "Edited"}), saved["id"])
+    assert database.setting("goose_sketches") == [updated]
+    assert database.setting("fun_settings") == {"goose": True}
+    change_library(database, None, saved["id"])
+    assert database.setting("goose_sketches") == []

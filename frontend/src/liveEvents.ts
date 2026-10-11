@@ -5,6 +5,7 @@ const subscribers = new Set<LiveEvents>()
 class LiveEvents {
   private listeners = new Map<string, Set<Listener>>()
   private closed = false
+  get connected() { return source?.readyState === EventSource.OPEN }
   addEventListener(type: string, listener: Listener) {
     if (this.closed) return
     const listeners = this.listeners.get(type) || new Set<Listener>()

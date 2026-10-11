@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.accounts import register_account_routes
@@ -24,6 +23,8 @@ from app.conversation import Conversation
 from app.conversation_routes import register_conversation_routes
 from app.db import Database
 from app.events import Events
+from app.frontend import FrontendAssets, FrontendBuild
+from app.fun import SOUND_EFFECTS
 from app.logs import ConsoleLogs
 from app.media import Media, MediaError
 from app.mixer import CapacityError
@@ -139,7 +140,7 @@ def create_app(settings: Settings | None = None, *, resume_channel_id: str | Non
         root_logger.setLevel(logging.INFO)
         root_logger.addHandler(console)
         db = Database(settings.data_dir / "library.sqlite3", settings.database_url.get_secret_value())
-        events = Events()
+        events = Events(app.state.frontend.build_id)
         media = await asyncio.to_thread(Media, settings, db, events)
         bot = Bot(settings, db, events)
         app.state.db, app.state.events, app.state.media, app.state.bot = db, events, media, bot
@@ -170,6 +171,7 @@ def create_app(settings: Settings | None = None, *, resume_channel_id: str | Non
 
     app = FastAPI(title="Geluidsman", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
+    app.state.frontend = FrontendBuild.read(ROOT / "frontend" / "dist")
     register_private_responses(app)
 
     register_auth_routes(app)
@@ -235,6 +237,7 @@ def register_state_routes(app: FastAPI, settings: Settings) -> None:
         media_settings = await app.state.db.run(lambda: app.state.media.settings)
         return {
             "user": user,
+            "build_id": app.state.frontend.build_id,
             "guilds": user["guilds"],
             "sources": (await app.state.db.run(app.state.db.sources)),
             "clips": (await app.state.db.run(app.state.db.clips, user["id"], str(settings.discord_guild_id))),
@@ -243,6 +246,8 @@ def register_state_routes(app: FastAPI, settings: Settings) -> None:
             "channel_imports": (await app.state.db.run(app.state.db.batches)),
             "status": app.state.bot.status(int(guild_id)) if guild_id else app.state.bot.status(),
             "channels": app.state.bot.channels(int(guild_id), member) if guild_id else [],
+            "fun": app.state.bot.state.fun_settings,
+            "kirby_remaining_ms": app.state.bot.state.kirby.remaining(user["id"]),
             "limits": {
                 "max_clip_seconds": settings.max_clip_seconds,
                 "max_source_seconds": media_settings.max_source_seconds,
@@ -488,6 +493,8 @@ def register_clip_routes(app: FastAPI, settings: Settings) -> None:
 def register_delete_routes(app: FastAPI) -> None:
     @app.delete("/api/clips/{clip_id}", dependencies=[Depends(require_sound_permission("delete"))])
     async def delete_clip(clip_id: str, request: Request) -> dict[str, object]:
+        if clip_id in SOUND_EFFECTS:
+            raise HTTPException(403, "This sound is protected because it is used by a Fun effect.")
         async with app.state.media.lock:
             if not (await app.state.db.run(app.state.db.one, "SELECT id FROM clips WHERE id=?", (clip_id,))):
                 raise HTTPException(404, "Sound not found.")
@@ -544,6 +551,22 @@ async def voice_target(app: FastAPI, request: Request, guild_id: str, channel_id
     if channel and str(channel.id) not in {item["id"] for item in app.state.bot.channels(int(guild_id), member)}:
         raise HTTPException(403, "You cannot control this voice channel.")
     return state
+
+
+def guard_manual_playback(state: GuildVoice, user_id: str, events: Events) -> None:
+    if state.voice and state.voice.is_connected():
+        try:
+            remaining, activated = state.kirby.attempt(user_id, state.fun_settings)
+        except OverflowError as error:
+            raise HTTPException(503, str(error)) from error
+        if activated:
+            events.publish("fun.kirby", {"user_id": user_id})
+        if remaining:
+            raise HTTPException(
+                409,
+                f"Kirby inhaled your soundboard. Try again in {math.ceil(remaining / 1000)} seconds.",
+                headers={"X-Kirby-Remaining-Ms": str(math.ceil(remaining))},
+            )
 
 
 def register_voice_routes(app: FastAPI, _settings: Settings) -> None:
@@ -603,6 +626,7 @@ def register_voice_routes(app: FastAPI, _settings: Settings) -> None:
         clip = await app.state.db.run(app.state.db.one, "SELECT * FROM clips WHERE id=?", (clip_id,))
         if not clip:
             raise HTTPException(404, "Sound not found.")
+        guard_manual_playback(state, user["id"], app.state.events)
         try:
             instance = state.play(app.state.media.root / clip_id / "sound.wav", clip)
         except ValueError:
@@ -690,7 +714,7 @@ def register_media_routes(app: FastAPI, _settings: Settings) -> None:
 
     dist = ROOT / "frontend" / "dist"
     if (dist / "assets").is_dir():
-        app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+        app.mount("/assets", FrontendAssets(directory=dist / "assets", build=app.state.frontend), name="assets")
 
     @app.get("/login", response_model=None)
     @app.get("/settings", response_model=None)

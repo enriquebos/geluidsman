@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import math
+import os
+import re
+import wave
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
+
+TARGET_LOUDNESS = -16.0
+TARGET_TRUE_PEAK = -2.0
+MAX_GAIN = 24.0
+SHORT_SOUND_RMS = -19.0
+
+
+class MediaError(ValueError):
+    pass
+
+
+async def process(args: Sequence[str | Path | float], deadline_seconds: float = 300, *, stderr: bool = False) -> bytes:
+    creationflags = 0x08000000 if os.name == "nt" else 0
+    proc = await asyncio.create_subprocess_exec(
+        *map(str, args), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, creationflags=creationflags
+    )
+    try:
+        out, errors = await asyncio.wait_for(proc.communicate(), deadline_seconds)
+    except BaseException:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.communicate()
+        raise
+    if proc.returncode:
+        message = "Media processing failed. The source may be corrupt or unsupported."
+        raise MediaError(message)
+    return errors if stderr else out
+
+
+def ffmpeg_command(executable: str, *args: str | Path | float) -> list[str | Path | float]:
+    return [executable, "-hide_banner", "-nostdin", "-y", "-protocol_whitelist", "file,pipe", *args]
+
+
+def normalization_gain(report: bytes) -> float:
+    try:
+        text = report.decode("utf8")
+        values, _ = json.JSONDecoder().raw_decode(text[text.rindex("{") :])
+        loudness, peak = float(values["input_i"]), float(values["input_tp"])
+    except (ValueError, KeyError, TypeError, UnicodeError) as error:
+        message = "Audio loudness could not be measured."
+        raise MediaError(message) from error
+    if peak == -math.inf:
+        return 0.0
+    if not math.isfinite(peak) or math.isnan(loudness) or loudness == math.inf:
+        message = "Audio loudness measurement is invalid."
+        raise MediaError(message)
+    loudness_gain = TARGET_LOUDNESS - loudness if math.isfinite(loudness) else MAX_GAIN
+    if loudness == -math.inf:
+        rms_levels = re.findall(r"RMS level dB:\s*(-?\d+(?:\.\d+)?|-inf)", text)
+        if rms_levels and math.isfinite(rms := float(rms_levels[-1])):
+            loudness_gain = SHORT_SOUND_RMS - rms
+    return min(loudness_gain, TARGET_TRUE_PEAK - peak, MAX_GAIN)
+
+
+async def measure_gain(source: Path, executable: str) -> float:
+    report = await process(
+        ffmpeg_command(
+            executable,
+            "-loglevel",
+            "info",
+            "-i",
+            source,
+            "-map",
+            "0:a:0",
+            "-af",
+            "astats=measure_perchannel=none:measure_overall=RMS_level:reset=0,"
+            "loudnorm=I=-16:TP=-2:LRA=11:print_format=json",
+            "-f",
+            "null",
+            "-",
+        ),
+        stderr=True,
+    )
+    return normalization_gain(report)
+
+
+def audio_frames(path: Path) -> int:
+    with wave.open(str(path), "rb") as reader:
+        if (reader.getframerate(), reader.getnchannels(), reader.getsampwidth()) != (48000, 2, 2):
+            message = "Normalized audio must be 48 kHz stereo PCM."
+            raise MediaError(message)
+        return reader.getnframes()
+
+
+async def normalize_sound(source: Path, destination: Path, executable: str) -> float:
+    frames = await asyncio.to_thread(audio_frames, source)
+    gain = await measure_gain(source, executable)
+    await process(
+        ffmpeg_command(
+            executable,
+            "-loglevel",
+            "error",
+            "-i",
+            source,
+            "-map",
+            "0:a:0",
+            "-af",
+            f"volume={gain:.6f}dB",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-c:a",
+            "pcm_s16le",
+            destination,
+        )
+    )
+    if await asyncio.to_thread(audio_frames, destination) != frames:
+        message = "Normalization changed the sound duration."
+        raise MediaError(message)
+    return gain

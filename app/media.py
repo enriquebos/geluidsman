@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from app.audio_processing import MediaError, normalize_sound, process
 from app.captions import parse
 from app.channels import ChannelImports
 from app.db import DATABASE_ERRORS, Database, new_id
@@ -24,7 +25,7 @@ from app.network import DownloadProxy, public_addresses, validate_url
 from app.storage import Storage, size
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable
 
     from app.config import Settings
     from app.events import Events
@@ -34,28 +35,6 @@ if TYPE_CHECKING:
 PROGRESS_INTERVAL_SECONDS = 0.5
 SUMMARY_CACHE_SECONDS = 5
 MIN_UPLOAD_SECONDS = 0.1
-
-
-class MediaError(ValueError):
-    pass
-
-
-async def process(args: Sequence[str | Path | float], deadline_seconds: float = 300) -> bytes:
-    creationflags = 0x08000000 if os.name == "nt" else 0
-    proc = await asyncio.create_subprocess_exec(
-        *map(str, args), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, creationflags=creationflags
-    )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), deadline_seconds)
-    except BaseException:
-        if proc.returncode is None:
-            proc.kill()
-        await proc.communicate()
-        raise
-    if proc.returncode:
-        msg = "Media processing failed. The source may be corrupt or unsupported."
-        raise MediaError(msg)
-    return out
 
 
 class Media:
@@ -483,9 +462,7 @@ class Media:
                         folder / "sound.wav",
                     )
                 )
-                await process(
-                    self.ffmpeg("-i", folder / "sound.wav", "-c:a", "aac", "-b:a", "128k", folder / "preview.m4a")
-                )
+                await self.normalize_clip_audio(folder)
                 await asyncio.to_thread(self.check_storage, folder)
                 await self.commit_media(
                     folder,
@@ -582,9 +559,7 @@ class Media:
                     ),
                     60,
                 )
-                await process(
-                    self.ffmpeg("-i", folder / "sound.wav", "-c:a", "aac", "-b:a", "128k", folder / "preview.m4a"), 60
-                )
+                await self.normalize_clip_audio(folder)
                 original.unlink()
                 await asyncio.to_thread(self.check_storage, folder)
                 await self.commit_media(
@@ -622,6 +597,12 @@ class Media:
             else:
                 self.summary_until = 0
                 return folder.name
+
+    async def normalize_clip_audio(self, folder: Path) -> None:
+        normalized = folder / "normalized.wav"
+        await normalize_sound(folder / "sound.wav", normalized, self.settings.ffmpeg_path)
+        await asyncio.to_thread(normalized.replace, folder / "sound.wav")
+        await process(self.ffmpeg("-i", folder / "sound.wav", "-c:a", "aac", "-b:a", "128k", folder / "preview.m4a"))
 
     def missing_audio_dependencies(self) -> bool:
         return not all(shutil.which(path) for path in (self.settings.ffmpeg_path, self.settings.ffprobe_path))
