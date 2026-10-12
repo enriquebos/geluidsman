@@ -2,10 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import { api, FunSettings } from './types'
 import { liveEvents } from './liveEvents'
 
-const items: { key: 'flashbang' | 'vine_boom' | 'sus' | 'dvd' | 'goose' | 'kirby'; name: string; description: string }[] = [
+const items: { key: 'flashbang' | 'vine_boom' | 'sus' | 'patapim' | 'tung_sahur' | 'skibidi' | 'spion' | 'dvd' | 'goose' | 'kirby'; name: string; description: string }[] = [
   { key: 'flashbang', name: 'Flashbang', description: 'The protected Flashbang sound whites out the page 600 ms after playback starts, then fades.' },
   { key: 'vine_boom', name: 'Vine boom', description: 'The protected Vine boom sound briefly zooms and shakes the page with The Rock.' },
   { key: 'sus', name: 'SUS', description: 'The protected SUS sound sends a red crewmate floating from left to right.' },
+  { key: 'patapim', name: 'Brr Brr Patapim', description: 'The protected BRR OPSTAAN sound sends a leafy, big-footed Patapim walking across the screen.' },
+  { key: 'tung_sahur', name: 'Tung sahur', description: 'The protected Tung sahur sound brings in the wooden character, who swings his bat and cracks the screen before leaving.' },
+  { key: 'skibidi', name: 'Skibidi Toilet', description: 'The protected Skibidi sound brings up a toilet with a bobbing, twisting meme head.' },
+  { key: 'spion', name: 'Spion', description: 'The protected Spion sound plays the supplied animation once in the center, disappearing after five seconds independently of the sound.' },
   { key: 'goose', name: 'Goose', description: 'A silent goose wanders, doodles and gets up to mischief, occasionally investigating or chasing your cursor.' },
   { key: 'kirby', name: 'Kirby anti-spam', description: 'Kirby inhales a spammer’s soundboard across their devices and pauses manual playback for five seconds. Existing sounds continue.' },
   { key: 'dvd', name: 'DVD screensaver', description: 'A silent bouncing DVD logo celebrates corner hits with confetti.' },

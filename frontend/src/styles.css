@@ -598,3 +598,33 @@ header.topbar.connection-bar { height:auto; min-height:90px; margin:0; padding:1
 .fun-goose,.goose-command-actor { transform-origin:0 0; }
 
 .goose-editor-tools label { display:grid; gap:8px; }
+
+.fun-patapim { position:absolute; left:0; bottom:12%; width:min(34vw,210px); animation:patapim-walk 6s linear forwards; filter:drop-shadow(0 8px 7px #0005); }
+.fun-patapim svg { width:100%; overflow:visible; }
+.patapim-body { animation:patapim-bob .42s ease-in-out infinite alternate; transform-origin:110px 170px; }
+.patapim-leg { transform-origin:110px 180px; animation:patapim-step .84s ease-in-out infinite; }
+.patapim-leg-back { animation-delay:-.42s; }
+@keyframes patapim-walk { from { transform:translateX(-230px); } to { transform:translateX(calc(100vw + 230px)); } }
+@keyframes patapim-step { 0%,100% { transform:rotate(-13deg); } 50% { transform:rotate(14deg); } }
+@keyframes patapim-bob { from { transform:translateY(0) rotate(-1deg); } to { transform:translateY(-5px) rotate(1deg); } }
+@media(prefers-reduced-motion:reduce) { .fun-patapim { animation:none; left:50%; translate:-50% 0; } .patapim-body,.patapim-leg { animation:none; } }
+
+.fun-tung-sahur { position:absolute; inset:0; pointer-events:none; }
+.tung-character { position:absolute; left:50%; top:50%; width:min(45vw,260px); height:auto; overflow:visible; animation:tung-visit 6s linear forwards; filter:drop-shadow(0 8px 8px #0006); }
+.tung-bat-arm { transform-origin:94px 184px; animation:tung-swing 6s linear forwards; }
+.tung-screen-cracks { position:absolute; inset:0; width:100%; height:100%; opacity:0; animation:tung-break 6s linear forwards; }
+@keyframes tung-visit { 0% { transform:translate(calc(50vw + 280px),-50%); opacity:0; } 12%,72% { transform:translate(-35%,-50%); opacity:1; } 77% { transform:translate(-35%,-50%) rotate(-3deg); opacity:1; } 100% { transform:translate(calc(50vw + 280px),-50%); opacity:0; } }
+@keyframes tung-swing { 0%,12% { transform:rotate(0); } 23% { transform:rotate(135deg); } 28%,32% { transform:rotate(-65deg); } 40%,100% { transform:rotate(0); } }
+@keyframes tung-break { 0%,27.9% { opacity:0; } 28%,75% { opacity:1; } 100% { opacity:0; } }
+@media(prefers-reduced-motion:reduce) { .tung-character { animation:none; transform:translate(-50%,-50%); } .tung-bat-arm { animation:none; } .tung-screen-cracks { animation:none; opacity:.65; } }
+
+.fun-skibidi { position:absolute; left:50%; top:50%; width:min(50vw,280px); animation:skibidi-visit 6s ease-in-out forwards; }
+.fun-skibidi svg { width:100%; height:auto; overflow:visible; }
+.skibidi-neck { transform-origin:125px 250px; animation:skibidi-bob .48s ease-in-out infinite; }
+.skibidi-head { transform-origin:128px 152px; animation:skibidi-twist .96s ease-in-out infinite; }
+@keyframes skibidi-visit { 0% { opacity:0; transform:translate(-50%,20%) scale(.65); } 8%,90% { opacity:1; transform:translate(-50%,-50%) scale(1); } 100% { opacity:0; transform:translate(-50%,20%) scale(.7); } }
+@keyframes skibidi-bob { 0%,100% { transform:translateY(4px) rotate(-5deg); } 50% { transform:translateY(-20px) rotate(6deg); } }
+@keyframes skibidi-twist { 0%,100% { transform:rotate(12deg) scaleX(.9); } 50% { transform:rotate(-13deg) scaleX(1.05); } }
+.fun-spion { position:absolute; left:50%; top:50%; translate:-50% -50%; width:min(72vw,420px); max-height:75vh; }
+.fun-spion video,.fun-spion img { display:block; width:100%; max-height:75vh; object-fit:contain; border-radius:12px; }
+@media(prefers-reduced-motion:reduce) { .fun-skibidi { animation:none; transform:translate(-50%,-50%); } .skibidi-neck,.skibidi-head { animation:none; } }

@@ -1,7 +1,7 @@
 export type ServerEmoji = { id: string; name: string; value: string; animated: boolean }
 export type Source = { id: string; url: string; title: string; duration: number; created_at: number; media_id?: string; captions?: { language: string; kind: string; status: string; error?: string }[] }
 export type CaptionMatch = { id: number; track_id: string; source_id: string; source_title: string; text: string; start: number; end: number; highlights?: number[][]; precision: 'word' | 'caption'; language: string; kind: string }
-export type FunSettings = { flashbang: boolean; vine_boom: boolean; dvd: boolean; sus: boolean; dvd_speed: number; goose: boolean; kirby: boolean; kirby_threshold: number; kirby_window: number }
+export type FunSettings = { flashbang: boolean; vine_boom: boolean; dvd: boolean; sus: boolean; patapim?: boolean; tung_sahur?: boolean; skibidi?: boolean; spion?: boolean; dvd_speed: number; goose: boolean; kirby: boolean; kirby_threshold: number; kirby_window: number }
 export type Clip = { protected?: boolean; created_at?: number; play_count?: number; user_play_count?: number; pinned?: boolean; id: string; source_id: string | null; name: string; emoji: string; tags: string[]; start: number; end: number; volume: number; source_title: string; creator_id?: string | null; creator_name?: string | null; creator_avatar?: string | null }
 export type Job = { title?: string; details?: Record<string, unknown>; id: string; url: string; status: string; progress: number; error: string | null; source_id: string | null }
 export type Playback = { id: string; clip_id: string; name: string; started_at: number; position: number; duration: number }

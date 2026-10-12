@@ -289,15 +289,26 @@ def test_startup_resets_discord_reported_voice_once(tmp_path: Path, *, present: 
     asyncio.run(scenario())
 
 
-def test_gateway_disconnect_cleans_voice_and_retains_network_recovery_target(tmp_path: Path) -> None:
+def test_gateway_disconnect_preserves_voice_and_retains_network_recovery_target(tmp_path: Path) -> None:
     async def scenario() -> None:
         db = Database(tmp_path / "gateway.sqlite3")
         bot = Bot(Settings(_env_file=None, discord_token=SecretStr(""), data_dir=tmp_path), db, Events())
         bot.state.desired_channel_id = "123"
         bot.state.disconnect_unlocked = AsyncMock()
+        bot.state.mixer = Mock()
+        mixer = bot.state.mixer
+        bot.state.receiver = Mock(close_session=AsyncMock())
+        bot.actions = Mock()
         await bot.client.on_disconnect()
-        bot.state.disconnect_unlocked.assert_awaited_once()
+        bot.state.disconnect_unlocked.assert_not_awaited()
+        mixer.cleanup.assert_not_called()
+        mixer.stop.assert_not_called()
+        bot.actions.invalidate.assert_called_once()
+        bot.state.receiver.close_session.assert_awaited_once()
         assert bot.state.desired_channel_id == "123"
+        assert VOICE_HANDSHAKE_TIMEOUT == 30
+        await bot.client.on_resumed()
+        assert bot.state.mixer is mixer
         await bot.close()
         assert bot.state.desired_channel_id is None
         db.close()

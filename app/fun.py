@@ -11,6 +11,10 @@ SOUND_EFFECTS = {
     "2beec8ee6e7148f89e44770189b2b555": "flashbang",
     "325a0351de6e4b27a6bc1a6799b05e2f": "vine_boom",
     "c48f9c6f2bdf4cd99536f594c9ef2f1b": "sus",
+    "75dcb32953744dbdaa0c4f6aa5445c0f": "patapim",
+    "1e5721474c58461ebfd99751b681bb3b": "tung_sahur",
+    "abfeb407046948a2a78a0e693bd35bfa": "skibidi",
+    "5592b9d7f19a418796c2c8a47dcefe52": "spion",
 }
 
 
@@ -20,6 +24,10 @@ class FunSettings(BaseModel):
     vine_boom: StrictBool = False
     dvd: StrictBool = False
     sus: StrictBool = False
+    patapim: StrictBool = False
+    tung_sahur: StrictBool = False
+    skibidi: StrictBool = False
+    spion: StrictBool = False
     goose: StrictBool = False
     kirby: StrictBool = False
     kirby_threshold: int = Field(default=20, ge=1, le=100, strict=True)

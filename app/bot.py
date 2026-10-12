@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 GUILD_MEMBER_PAGE_SIZE = 1000
 EXCLUDED_VOICE_CHANNEL_ID = 1355614484797980723
-VOICE_HANDSHAKE_TIMEOUT = 60.0
+VOICE_HANDSHAKE_TIMEOUT = 30.0
 VOICE_RECOVERY_GRACE = 30.0
 
 
@@ -343,9 +343,15 @@ class Bot:
 
         @self.client.event
         async def on_disconnect() -> None:
-            async with self.state.lock:
-                await self.state.disconnect_unlocked()
+            if self.actions:
+                self.actions.invalidate()
+            if self.state.receiver:
+                await self.state.receiver.close_session()
             self.events.publish("status")
+
+        @self.client.event
+        async def on_resumed() -> None:
+            self.events.publish("refresh")
 
         @self.client.event
         async def on_guild_emojis_update(
@@ -574,7 +580,7 @@ class Bot:
             connected = False
             while True:
                 voice = self.state.voice
-                current = bool(voice and voice.is_connected() and self.client.is_ready())
+                current = bool(voice and voice.is_connected())
                 if connected and not current and self.state.mixer:
                     self.state.mixer.stop()
                     self.events.publish("status")

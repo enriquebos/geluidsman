@@ -95,9 +95,12 @@ def test_guest_leaderboard_uses_discord_identity(client: TestClient) -> None:
     assert rows[0]["played"] == 1
 
 
+@pytest.mark.parametrize("effect", ["flashbang", "patapim", "tung_sahur", "skibidi", "spion"])
 @pytest.mark.parametrize("state", ["paused", "playing", "idle"])
 @pytest.mark.parametrize("kind", ["enabled", "disabled", "same_name"])
-def test_successful_playback_emits_only_bound_enabled_effect(tmp_path: Path, state: str, kind: str) -> None:
+def test_successful_playback_emits_only_bound_enabled_effect(
+    tmp_path: Path, state: str, kind: str, effect: str
+) -> None:
     async def scenario() -> None:
         db = Database(tmp_path / "playback.sqlite3")
         events = Events()
@@ -111,8 +114,14 @@ def test_successful_playback_emits_only_bound_enabled_effect(tmp_path: Path, sta
         voice.is_playing.return_value = state == "playing"
         value = GuildVoice(Settings(_env_file=None, data_dir=tmp_path), db, events, client, 1352422295402057759)
         value.mixer = Mixer(on_change=lambda: None)
-        value.fun_settings["flashbang"] = kind != "disabled"
-        sound = {**clip(), "id": next(iter(SOUND_EFFECTS)) if kind != "same_name" else "impostor", "name": "Flashbang"}
+        value.fun_settings[effect] = kind != "disabled"
+        sound = {
+            **clip(),
+            "id": next(key for key, value in SOUND_EFFECTS.items() if value == effect)
+            if kind != "same_name"
+            else "impostor",
+            "name": "Flashbang",
+        }
         instance = value.play(audio_file(tmp_path), sound)
         messages = []
         while not queue.empty():
@@ -121,7 +130,7 @@ def test_successful_playback_emits_only_bound_enabled_effect(tmp_path: Path, sta
         assert bool(effects) is (kind == "enabled")
         if effects:
             assert instance in effects[0]
-            assert '"effect": "flashbang"' in effects[0]
+            assert f'"effect": "{effect}"' in effects[0]
         value.mixer.cleanup()
         db.close()
 
