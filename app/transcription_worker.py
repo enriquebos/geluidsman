@@ -4,17 +4,21 @@ import asyncio
 import gc
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from requests import RequestException
 
 from app.transcription_models import DUTCH_MODEL, ModelSelection, convert_dutch_model, model_path
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
+
+    from starlette.responses import Response
 
 MAX_AUDIO_BYTES = 320000
 MAX_BATCH = 4
@@ -23,6 +27,10 @@ NO_SPEECH_THRESHOLD = 0.6
 
 
 def load_model(name: str = "large-v3-turbo") -> object:
+    if os.environ.get("TRANSCRIPTION_DEVICE") == "mlx":
+        from app.apple_transcription import AppleModel
+
+        return AppleModel(name)
     from faster_whisper import WhisperModel
 
     device = os.environ.get("TRANSCRIPTION_DEVICE", "cuda")
@@ -37,6 +45,9 @@ def load_model(name: str = "large-v3-turbo") -> object:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    if os.environ.get("TRANSCRIPTION_DEVICE") == "mlx" and not os.environ.get("TRANSCRIPTION_API_TOKEN"):
+        message = "Native Apple GPU worker requires TRANSCRIPTION_API_TOKEN. Use just start."
+        raise RuntimeError(message)
     app.state.model = None
     app.state.error = None
     app.state.lock = asyncio.Lock()
@@ -73,6 +84,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
+@app.middleware("http")
+async def authenticate(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+    token = os.environ.get("TRANSCRIPTION_API_TOKEN", "")
+    if token and not secrets.compare_digest(
+        request.headers.get("authorization", "").encode(), ("Bearer " + token).encode()
+    ):
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
 @app.get("/health")
 def health() -> dict:
     return {
@@ -83,6 +104,10 @@ def health() -> dict:
         "error": app.state.error,
         "device": os.environ.get("TRANSCRIPTION_DEVICE", "cuda"),
         "max_batch": MAX_BATCH,
+        "pid": os.getpid(),
+        "models": ["large-v3-turbo", "large-v3"]
+        if os.environ.get("TRANSCRIPTION_DEVICE") == "mlx"
+        else ["large-v3-turbo", "large-v3", DUTCH_MODEL],
     }
 
 
@@ -91,6 +116,11 @@ class ModelInput(ModelSelection):
 
 
 def download_model(name: str) -> None:
+    if os.environ.get("TRANSCRIPTION_DEVICE") == "mlx":
+        from app.apple_transcription import download_apple_model
+
+        download_apple_model(name)
+        return
     from faster_whisper.utils import download_model as download
 
     if name == DUTCH_MODEL:
@@ -125,6 +155,8 @@ async def replace_model(name: str) -> None:
 
 @app.put("/model", status_code=202)
 async def select_model(body: ModelInput) -> dict:
+    if body.model not in health()["models"]:
+        raise HTTPException(422, "This model is unavailable on the selected transcription backend.")
     if app.state.target is not None or app.state.model is None:
         raise HTTPException(409, "The transcription model is still loading or switching.")
     if body.model != app.state.model_name:
@@ -135,6 +167,8 @@ async def select_model(body: ModelInput) -> dict:
 
 
 def recognize_many(items: list[bytes], language: str = "nl") -> list[dict]:
+    if os.environ.get("TRANSCRIPTION_DEVICE") == "mlx":
+        return [recognize(pcm, language) for pcm in items]
     from faster_whisper import BatchedInferencePipeline
     from faster_whisper.vad import VadOptions, collect_chunks, get_speech_timestamps
 
@@ -180,6 +214,8 @@ def recognize_many(items: list[bytes], language: str = "nl") -> list[dict]:
 
 
 def recognize(pcm: bytes, language: str = "nl") -> dict:
+    if os.environ.get("TRANSCRIPTION_DEVICE") == "mlx":
+        return app.state.model.recognize(pcm, language)
     audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768
     segments, info = app.state.model.transcribe(
         audio,

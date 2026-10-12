@@ -18,7 +18,7 @@ services:
       JS_RUNTIME: deno
       DATABASE_URL: "postgresql://${POSTGRES_USER:-geluidsman}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-geluidsman}"
     ports:
-      - "${PORT:-8687}:8687"
+      - "${APP_BIND_ADDRESS:-0.0.0.0}:${PORT:-8687}:8687"
     volumes:
       - ./data:/data
     depends_on:

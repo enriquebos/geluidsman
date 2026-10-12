@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     ffprobe_path: str = "ffprobe"
     js_runtime: str = "deno"
     transcription_url: str = "http://transcription:8000"
+    transcription_api_token: SecretStr = SecretStr("")
 
     @field_validator("app_base_url")
     @classmethod

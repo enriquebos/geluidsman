@@ -1,5 +1,8 @@
 services:
   transcription:
+    image: geluidsman-transcription-cpu:local
+    build:
+      target: transcription-cpu
     gpus: !reset []
     environment:
       TRANSCRIPTION_DEVICE: cpu

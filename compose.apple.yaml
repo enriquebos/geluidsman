@@ -1,0 +1,7 @@
+services:
+  app:
+    environment:
+      TRANSCRIPTION_URL: http://host.docker.internal:8000
+  transcription:
+    profiles: [container-transcription]
+    gpus: !reset []

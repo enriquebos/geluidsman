@@ -139,3 +139,34 @@ def test_model_switch_and_rollback(
 def test_model_switch_rejects_when_loading(client: TestClient) -> None:
     worker.app.state.model = None
     assert client.put("/model", json={"model": "large-v3"}).status_code == 409
+
+
+def test_native_worker_requires_authentication(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRANSCRIPTION_API_TOKEN", "test-worker-token")
+    for path in ("/health", "/transcribe", "/model"):
+        assert client.get(path).status_code == 401
+    assert client.get("/health", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    response = client.get("/health", headers={"Authorization": "Bearer test-worker-token"})
+    assert response.status_code == 200
+    assert "test-worker-token" not in response.text
+
+
+def test_apple_models_and_speaker_isolation(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRANSCRIPTION_DEVICE", "mlx")
+    assert client.get("/health").json()["models"] == ["large-v3-turbo", "large-v3"]
+    assert client.put("/model", json={"model": worker.DUTCH_MODEL}).status_code == 422
+    model = SimpleNamespace(
+        recognize=Mock(side_effect=[{"text": "one", "language": "nl"}, {"text": "two", "language": "en"}])
+    )
+    worker.app.state.model = model
+    response = client.post("/transcribe/batch?lengths=2&lengths=4&language=auto", content=b"aabbbb")
+    assert response.json()["results"] == [{"text": "one", "language": "nl"}, {"text": "two", "language": "en"}]
+    assert model.recognize.call_args_list[0].args == (b"aa", "auto")
+    assert model.recognize.call_args_list[1].args == (b"bbbb", "auto")
+
+
+def test_apple_startup_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRANSCRIPTION_DEVICE", "mlx")
+    monkeypatch.delenv("TRANSCRIPTION_API_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="requires TRANSCRIPTION_API_TOKEN"), TestClient(worker.app):
+        pass

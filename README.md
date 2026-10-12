@@ -79,6 +79,84 @@ The application is **1502044170406199416**, restricted to server
 **1352422295402057759**. The bot needs View Channel, Connect and Speak. The token
 is used only by the backend; the dashboard cannot read `.env`.
 
+## Local macOS installation
+
+Install Docker Desktop for Mac. In the existing ignored `.env`, set:
+
+```dotenv
+APP_BASE_URL=http://localhost:8687
+APP_BIND_ADDRESS=127.0.0.1
+COMPOSE_FILE=compose.yaml:compose.cpu.yaml
+TRANSCRIPTION_URL=http://transcription:8000
+```
+
+Run `just update` (or `docker compose up -d --build --wait`), then open
+**http://localhost:8687**. Compose reads `COMPOSE_FILE` from `.env`, so subsequent
+`just start`, `just stop`, and other Docker shortcuts retain the CPU selection.
+The CPU override builds without NVIDIA dependencies and uses CPU INT8 inference.
+The dashboard port is accessible only from this Mac; transcription remains on the
+private Compose network. CPU transcription can be slower than the NVIDIA worker.
+
+Add `http://localhost:8687/api/auth/discord/callback` to OAuth2 → Redirects in the
+Discord Developer Portal for your application, retaining the other PC's redirect
+if it is still used. Keep the existing credentials and encryption key. Stop the
+other PC's app before running the same Discord bot on the Mac.
+
+Copying the repository and `data` directory does not transfer PostgreSQL's named
+Docker volume. To retain accounts, permissions, library metadata and jobs, follow
+the database backup/restore procedure below. Do not delete either machine's volumes.
+
+## Apple Silicon GPU transcription
+
+Apple M-series Macs can use the native MLX worker while the app and PostgreSQL
+remain in Docker. Docker's Linux worker cannot use Metal; the Apple worker runs
+on macOS. Install Poetry and native ARM64 Python 3.11–3.14, then run
+`just apple-install`. It creates an isolated, locked environment in
+`workers/apple/.venv`; dependencies for the Windows/Linux workers are unchanged.
+
+In the existing private `.env`, set:
+
+```dotenv
+COMPOSE_FILE=compose.yaml:compose.apple.yaml
+TRANSCRIPTION_URL=http://host.docker.internal:8000
+TRANSCRIPTION_API_TOKEN=YOUR_RANDOM_SECRET
+```
+
+Generate the token locally with
+`python3 -c "import secrets; print(secrets.token_urlsafe(32))"` and keep it only in
+`.env`. Keep your configured dashboard URL, database credentials and encryption key.
+When switching from CPU mode, stop the old worker once with
+`docker compose -f compose.yaml -f compose.cpu.yaml stop transcription`.
+Then run `just update`. `just start`, `just stop`, `just update`, and `just status`
+manage both the native worker and Compose; use `just apple-logs` for native worker
+logs. Direct Docker commands do not start or stop the macOS process. After updating
+worker code, use `just update` to restart it. The Mac must stay awake during use.
+
+The worker uses the Apple GPU through Metal, not the Neural Engine. The HTTP
+listener uses port 8000 so Docker can reach the host; all routes require the
+shared token. The token never appears in the browser, health status or command
+arguments. Model downloads stay in `data/models/apple` and are pinned to specific
+upstream revisions. Audio remains bounded in memory and is never uploaded.
+
+The default recommendation is full-precision FP16 `large-v3-turbo` for live Dutch
+and English speech. `large-v3` is also available for comparison, with a slower
+full decoder. MLX uses a WebRTC voice-activity gate before inference, deterministic greedy
+decoding and Whisper's no-speech filter; it does not offer the existing CTranslate2 beam-five decoder. Batch
+requests preserve each speaker's audio separately and decode sequentially on the
+GPU. Model loading includes a warm-up before reporting ready. Switching pauses
+transcription, retains the previous model on failure and leaves playback available.
+The model picker shows only models supported by the active backend. The existing
+CTranslate2 Dutch fine-tuned model is unavailable on MLX; an incompatible saved
+selection changes to the ready worker's model when status is refreshed.
+
+Speed and accuracy depend on speech, model, simultaneous speakers and system load.
+On this M2 Pro, a 5.805-second synthetic Dutch utterance took a median 0.703 seconds
+with MLX Turbo, 1.233 seconds with MLX Large V3 and 4.465 seconds with CPU INT8
+Turbo. Each median uses three HTTP calls after warm-up. All three produced one
+word error in the same 17-word reference. This sample supports choosing Turbo
+for latency, but does not establish accuracy for noisy Discord audio.
+Use a user-controlled voice test to compare both models on your own microphones.
+
 ## Command shortcuts
 
 Optional [Just](https://just.systems/man/en/packages.html) shortcuts are defined in
@@ -657,7 +735,7 @@ Media usage is tracked per local revision and updated after successful imports, 
 
 Async database work uses four bounded worker slots with the existing transaction lock. Authenticated requests still read effective permissions from PostgreSQL every time. Caption cues use pipelined batch inserts and one search-index insert per track, preserving transactional refresh rollback. The additive transcript arrival-order column/index allows incremental updates to include late speech from overlapping speakers.
 
-Each browser tab shares one authenticated event stream. Inline and floating chats share permission-checked transcript fetches and history, load only newer messages after initialization, and clear their store when the session becomes inaccessible or the last view closes. Transcript text remains outside SSE. Editor and admin routes load on demand. The measurements and validation are documented in [the performance review](docs/performance-review-2026-10-10.md).
+Each browser tab shares one authenticated event stream. Inline and floating chats share permission-checked transcript fetches and history, load only newer messages after initialization, and clear their store when the session becomes inaccessible or the last view closes. Transcript text remains outside SSE. Editor and admin routes load on demand.
 
 
 ### Fun effects and trigger credit

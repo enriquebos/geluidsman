@@ -24,6 +24,7 @@ WORKDIR /app
 COPY --from=dependencies /opt/venv /opt/venv
 COPY app/ ./app/
 COPY --from=frontend /build/dist ./frontend/dist
+RUN chmod -R a+rX /app/app /app/frontend
 USER app
 EXPOSE 8687
 CMD ["python", "-m", "app"]
@@ -45,5 +46,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && mkd
 ENV LD_LIBRARY_PATH="/opt/venv/lib/python3.12/site-packages/nvidia/cublas/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cudnn/lib"
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+USER app
+CMD ["python", "-m", "app.transcription_worker"]
+
+FROM dependencies AS transcription-cpu-dependencies
+RUN --mount=type=cache,target=/root/.cache/pypoetry poetry install --only main,worker --no-interaction
+
+FROM app AS transcription-cpu
+USER root
+COPY --from=transcription-cpu-dependencies /opt/venv /opt/venv
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && mkdir /models && chown app:app /models
+ENV TRANSCRIPTION_DEVICE=cpu
+ENV TRANSCRIPTION_COMPUTE_TYPE=int8
 USER app
 CMD ["python", "-m", "app.transcription_worker"]

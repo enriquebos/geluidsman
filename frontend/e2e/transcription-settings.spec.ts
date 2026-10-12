@@ -56,3 +56,15 @@ test('trigger sound dropdown stays inside viewport', async ({ page, request }) =
   await expect(menu).not.toBeVisible()
   await request.delete(`/api/clips/${clip}`)
 })
+
+test('Apple GPU offers only supported models', async ({ page }) => {
+  await page.route('**/api/admin/transcription', route => route.fulfill({ json: {
+    ready: true, model: 'large-v3-turbo', phase: 'ready', device: 'mlx', models: ['large-v3-turbo', 'large-v3'],
+  } }))
+  await page.goto('/admin?tab=settings')
+  await expect(page.locator('.transcription-settings')).toContainText('Apple GPU')
+  await page.getByRole('button', { name: 'Transcription model', exact: true }).click()
+  await expect(page.getByRole('option', { name: /large-v3-turbo/ })).toBeVisible()
+  await expect(page.getByRole('option', { name: 'large-v3 · Full model', exact: true })).toBeVisible()
+  await expect(page.getByRole('option', { name: /yuriyvnv/ })).toHaveCount(0)
+})

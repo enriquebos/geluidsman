@@ -84,7 +84,12 @@ class Conversation:
 
     async def start(self) -> None:
         await self.db.run(self.db.execute, "DELETE FROM conversations")
-        self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25))
+        headers = (
+            {"Authorization": "Bearer " + self.settings.transcription_api_token.get_secret_value()}
+            if self.settings.transcription_api_token
+            else {}
+        )
+        self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), headers=headers)
         self.tasks = [asyncio.create_task(self.monitor()), asyncio.create_task(self.process())]
 
     def snapshot(self) -> dict:
@@ -159,6 +164,10 @@ class Conversation:
             async with self.http.get(self.settings.transcription_url + "/health") as response:
                 response.raise_for_status()
                 status = await response.json()
+            supported = status.get("models")
+            if supported and desired not in supported and status.get("ready"):
+                desired = status["model"]
+                await self.db.run(self.db.set_setting, "transcription_model", desired)
             if status.get("error") and status.get("ready") and status.get("model") != desired:
                 await self.db.run(self.db.set_setting, "transcription_model", status["model"])
                 desired = status["model"]
