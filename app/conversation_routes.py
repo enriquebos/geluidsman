@@ -10,8 +10,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.auth import authorize_admin
 from app.db import new_id
+from app.deepgram_options import DeepgramOptions
 from app.permissions import require_permission
-from app.transcription_models import ModelSelection
+from app.transcription_vocabulary import VocabularyHints
 
 MAX_DISCORD_ID = 20
 MESSAGE_PAGE_SIZE = 100
@@ -22,9 +23,23 @@ MAX_TRIGGER_TEXT_LENGTH = MAX_TRIGGER_TERMS * (MAX_TRIGGER_TERM_LENGTH + 1) - 1
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
+    from app.conversation import Conversation
 
-class TranscriptionInput(ModelSelection):
+
+class TranscriptionInput(BaseModel):
+    model: Literal["large-v3-turbo", "large-v3", "yuriyvnv/whisper-large-v3-high-mixed-nl", "nova-3"]
+
+
+class DeepgramInput(DeepgramOptions):
     pass
+
+
+class AdminLanguageInput(BaseModel):
+    language: Literal["en", "nl", "multi"]
+
+
+class ProviderInput(BaseModel):
+    provider: Literal["local", "deepgram"]
 
 
 class RecordingInput(BaseModel):
@@ -127,6 +142,12 @@ def register_conversation_routes(app: FastAPI) -> None:
     register_message_routes(app)
 
 
+def message_details(manager: Conversation, rows: list[dict]) -> list[dict]:
+    if not manager.deepgram:
+        return rows
+    return [{**row, "search_hits": manager.deepgram.details.get(row["id"], [])} for row in rows]
+
+
 def register_message_routes(app: FastAPI) -> None:
     @app.get("/api/conversations/{session_id}/messages", dependencies=[Depends(authorize_live_conversation)])
     def messages(
@@ -163,7 +184,8 @@ def register_message_routes(app: FastAPI) -> None:
             )
             return {
                 "session": session,
-                "items": rows[:MESSAGE_PAGE_SIZE],
+                "items": message_details(manager, rows[:MESSAGE_PAGE_SIZE]),
+                "interims": list(manager.deepgram.interims.values()) if manager.deepgram else [],
                 "has_new": len(rows) > MESSAGE_PAGE_SIZE,
                 "has_older": False,
             }
@@ -173,7 +195,12 @@ def register_message_routes(app: FastAPI) -> None:
             "ORDER BY started_at DESC,id DESC LIMIT 101",
             (session_id, timestamp, timestamp, cursor),
         )
-        return {"session": session, "items": list(reversed(rows[:100])), "has_older": len(rows) > MESSAGE_PAGE_SIZE}
+        return {
+            "session": session,
+            "items": message_details(manager, list(reversed(rows[:100]))),
+            "has_older": len(rows) > MESSAGE_PAGE_SIZE,
+            "interims": list(manager.deepgram.interims.values()) if manager.deepgram else [],
+        }
 
 
 def register_trigger_users(app: FastAPI, path: str, permission: str) -> None:
@@ -285,7 +312,73 @@ def register_trigger_routes(app: FastAPI) -> None:
         return {"ok": True}
 
 
+def register_language_routes(app: FastAPI) -> None:
+    @app.put("/api/admin/transcription/language", dependencies=[Depends(authorize_admin)])
+    async def transcription_language(body: AdminLanguageInput, request: Request) -> dict:
+        manager = app.state.conversation
+        language = "auto" if body.language == "multi" else body.language
+        await app.state.db.run(app.state.db.set_setting, "conversation_language", language)
+        manager.language = language
+        if manager.deepgram:
+            await manager.close_session()
+        await app.state.db.run(app.state.db.audit, request.state.user["id"], "settings.edit", details=body.model_dump())
+        app.state.events.publish("conversation")
+        return body.model_dump()
+
+
+def register_provider_routes(app: FastAPI) -> None:
+    @app.put("/api/admin/transcription/provider", dependencies=[Depends(authorize_admin)])
+    async def transcription_provider(body: ProviderInput, request: Request) -> dict:
+        try:
+            status = await app.state.conversation.select_provider(body.provider)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        except (aiohttp.ClientError, TimeoutError) as error:
+            raise HTTPException(503, "The local transcription worker could not be reached.") from error
+        await app.state.db.run(app.state.db.audit, request.state.user["id"], "settings.edit", details=body.model_dump())
+        return status
+
+
+def register_deepgram_routes(app: FastAPI) -> None:
+    @app.get("/api/admin/transcription/deepgram", dependencies=[Depends(authorize_admin)])
+    async def deepgram_options() -> dict:
+        return app.state.conversation.deepgram_options.model_dump()
+
+    @app.put("/api/admin/transcription/deepgram", dependencies=[Depends(authorize_admin)])
+    async def update_deepgram_options(body: DeepgramInput, request: Request) -> dict:
+        manager = app.state.conversation
+        await app.state.db.run(app.state.db.set_setting, "deepgram_options", body.model_dump())
+        manager.deepgram_options = body
+        if manager.deepgram:
+            await manager.close_session()
+        await app.state.db.run(
+            app.state.db.audit, request.state.user["id"], "settings.edit", details={"deepgram_options_updated": True}
+        )
+        app.state.events.publish("conversation")
+        return body.model_dump()
+
+
 def register_transcription_routes(app: FastAPI) -> None:
+    register_provider_routes(app)
+    register_language_routes(app)
+    register_deepgram_routes(app)
+
+    @app.get("/api/admin/transcription/vocabulary", dependencies=[Depends(authorize_admin)])
+    async def transcription_vocabulary() -> dict:
+        return VocabularyHints(hints=app.state.conversation.vocabulary).model_dump()
+
+    @app.put("/api/admin/transcription/vocabulary", dependencies=[Depends(authorize_admin)])
+    async def update_vocabulary(body: VocabularyHints, request: Request) -> dict:
+        await app.state.db.run(app.state.db.set_setting, "transcription_vocabulary", body.hints)
+        app.state.conversation.vocabulary = body.hints
+        await app.state.db.run(
+            app.state.db.audit,
+            request.state.user["id"],
+            "settings.edit",
+            details={"vocabulary_characters": len(body.hints)},
+        )
+        return body.model_dump()
+
     @app.get("/api/admin/transcription", dependencies=[Depends(authorize_admin)])
     async def transcription_status() -> dict:
         return await app.state.conversation.synchronize_model()

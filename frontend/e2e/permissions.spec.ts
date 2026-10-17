@@ -26,6 +26,8 @@ test('admin tabs preserve console controls and scroll, reload and browser histor
   await page.getByRole('tab', { name: 'Permissions', exact: true }).focus()
   await page.keyboard.press('Home')
   await expect(page.getByRole('tab', { name: 'Settings', exact: true })).toBeFocused()
+  await page.keyboard.press('ArrowRight')
+  await expect(page.getByRole('tab', { name: 'Conversation', exact: true })).toBeFocused()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy()
 })
 

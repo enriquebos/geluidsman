@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator
@@ -30,6 +31,8 @@ class Settings(BaseSettings):
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
     js_runtime: str = "deno"
+    transcription_provider: Literal["local", "deepgram"] = "local"
+    deepgram_api_key: SecretStr = SecretStr("")
     transcription_url: str = "http://transcription:8000"
     transcription_api_token: SecretStr = SecretStr("")
 

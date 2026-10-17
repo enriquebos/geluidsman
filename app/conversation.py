@@ -15,7 +15,10 @@ import discord
 
 from app.conversation_audio import ReceiveSink, Segmenter
 from app.db import DATABASE_ERRORS, new_id
+from app.deepgram_options import DeepgramOptions
+from app.deepgram_transcription import DeepgramStreams
 from app.permissions import effective_permissions
+from app.transcription_vocabulary import VOCABULARY_HEADER, encode_hints
 from app.trigger_playback import PlaybackContext, TriggerPlayback, cancel_pending, reserve_cooldown
 
 if TYPE_CHECKING:
@@ -33,6 +36,7 @@ BATCH_WAIT_SECONDS = 0.04
 MAX_AGE = 30
 MESSAGE_DEDUP_LIMIT = 1024
 CLEANUP_INTERVAL = 3600
+DROP_REPORT_SECONDS = 30
 
 
 def normalize_speech(value: str) -> str:
@@ -59,6 +63,8 @@ class Conversation:
     def __init__(self, settings: Settings, db: Database, events: Events, bot: Bot) -> None:
         self.settings, self.db, self.events, self.bot = settings, db, events, bot
         self.language = db.setting("conversation_language", default="nl")
+        self.deepgram_options = DeepgramOptions.model_validate(db.setting("deepgram_options", default={}))
+        self.vocabulary = db.setting("transcription_vocabulary", default="")
         self.enabled = db.setting("conversation_enabled", default=True)
         self.session: dict | None = None
         self.voice = None
@@ -72,6 +78,7 @@ class Conversation:
         self.error: str | None = None
         self.dropped = 0
         self.reported_dropped = 0
+        self.last_drop_report = float("-inf")
         self.cooldowns: dict[str, float] = {}
         self.fired_messages: dict[str, None] = {}
         self.last_cleanup = 0.0
@@ -81,6 +88,11 @@ class Conversation:
         self.model_status: dict = {}
         self.model_retry = 0.0
         self.model_lock = asyncio.Lock()
+        self.provider = db.setting("transcription_provider", default=settings.transcription_provider)
+        self.deepgram = DeepgramStreams(self) if self.provider == "deepgram" else None
+        self.switching_provider = False
+        self.closing_session = False
+        self.session_lock = asyncio.Lock()
 
     async def start(self) -> None:
         await self.db.run(self.db.execute, "DELETE FROM conversations")
@@ -120,6 +132,14 @@ class Conversation:
             self.dropped += 1
 
     async def close_session(self) -> None:
+        async with self.session_lock:
+            self.closing_session = True
+            try:
+                await self.finish_session()
+            finally:
+                self.closing_session = False
+
+    async def finish_session(self) -> None:
         await cancel_pending(self.delayed)
         if getattr(self.bot, "actions", None) and self.voice:
             self.bot.actions.release_speech()
@@ -128,6 +148,8 @@ class Conversation:
             self.voice.stop_listening()
         self.voice = None
         session, self.session = self.session, None
+        if self.deepgram:
+            await self.deepgram.close()
         self.segmenter = Segmenter()
         while not self.packets.empty():
             try:
@@ -140,7 +162,39 @@ class Conversation:
             await self.db.run(self.db.execute, "DELETE FROM conversations WHERE id=?", (session["id"],))
             self.events.publish("conversation")
 
+    async def select_provider(self, provider: str) -> dict:
+        async with self.model_lock:
+            if provider == self.provider:
+                return await self.check_model()
+            if provider == "deepgram" and not self.settings.deepgram_api_key:
+                message = "Set DEEPGRAM_API_KEY in .env before selecting Deepgram."
+                raise ValueError(message)
+            if provider == "local":
+                async with self.http.get(self.settings.transcription_url + "/health") as response:
+                    response.raise_for_status()
+                    status = await response.json()
+                if not status.get("ready"):
+                    message = "The local transcription worker is unavailable or still loading."
+                    raise ValueError(message)
+            self.switching_provider = True
+            try:
+                await self.close_session()
+                await self.db.run(self.db.set_setting, "transcription_provider", provider)
+                self.provider = provider
+                self.deepgram = DeepgramStreams(self) if provider == "deepgram" else None
+                self.model_status = {}
+                self.model_retry = 0
+            finally:
+                self.switching_provider = False
+            self.events.publish("conversation")
+            return await self.check_model()
+
     async def select_model(self, name: str) -> dict:
+        if self.deepgram:
+            if name != "nova-3":
+                message = "Only Nova-3 is available for the Deepgram provider."
+                raise ValueError(message)
+            return await self.check_model()
         async with self.model_lock:
             async with self.http.put(self.settings.transcription_url + "/model", json={"model": name}) as response:
                 response.raise_for_status()
@@ -157,6 +211,20 @@ class Conversation:
             return await self.check_model()
 
     async def check_model(self) -> dict:
+        if self.deepgram:
+            ready = bool(self.settings.deepgram_api_key)
+            self.model_status = {
+                "selected": "nova-3",
+                "model": "nova-3",
+                "device": "deepgram",
+                "provider": self.provider,
+                "language": "multi" if self.language == "auto" else self.language,
+                "models": ["nova-3"],
+                "ready": ready,
+                "phase": "configured" if ready else "unavailable",
+                "error": None if ready else "Set DEEPGRAM_API_KEY in .env.",
+            }
+            return self.model_status
         desired = await self.db.run(self.db.setting, "transcription_model", "large-v3-turbo")
         if self.http is None:
             return {"model": desired, "phase": "unavailable", "ready": False}
@@ -182,9 +250,19 @@ class Conversation:
             self.model_status = status
         except (aiohttp.ClientError, TimeoutError, ValueError):
             self.model_status = {"model": desired, "phase": "unavailable", "ready": False}
-        return {"selected": desired, **self.model_status}
+        return {
+            "provider": self.provider,
+            "language": "multi" if self.language == "auto" else self.language,
+            "selected": desired,
+            **self.model_status,
+        }
 
     async def worker_ready(self) -> bool:
+        if self.deepgram:
+            status = await self.check_model()
+            if not status["ready"]:
+                self.error = status["error"]
+            return status["ready"]
         try:
             async with self.http.get(self.settings.transcription_url + "/health") as response:
                 ready = response.status == HTTPStatus.OK and (await response.json()).get("ready", False)
@@ -222,8 +300,15 @@ class Conversation:
             self.update_participants(voice)
 
     async def open_session(self, voice: VoiceRecvClient) -> None:
-        if time.monotonic() < self.receiver_retry or self.model_status.get("target") or not await self.worker_ready():
+        if (
+            self.switching_provider
+            or self.closing_session
+            or time.monotonic() < self.receiver_retry
+            or self.model_status.get("target")
+            or not await self.worker_ready()
+        ):
             return
+        provider = self.provider
         session = {
             "id": new_id(),
             "channel_id": str(voice.channel.id),
@@ -236,7 +321,7 @@ class Conversation:
             "INSERT INTO conversations(id,channel_id,channel_name,started_at) VALUES (?,?,?,?)",
             (session["id"], session["channel_id"], session["channel_name"], session["started_at"]),
         )
-        if not self.enabled:
+        if not self.enabled or self.switching_provider or self.closing_session or self.provider != provider:
             await self.db.run(self.db.execute, "DELETE FROM conversations WHERE id=?", (session["id"],))
             return
         if voice is not self.bot.voice or not voice.is_connected() or self.bot.state.deafened:
@@ -244,6 +329,7 @@ class Conversation:
             return
         self.allowed = {str(member.id) for member in voice.channel.members if not member.bot}
         self.session, self.voice = session, voice
+        self.update_participants(voice)
         try:
             actions = getattr(self.bot, "actions", None)
             if actions:
@@ -269,6 +355,12 @@ class Conversation:
         members = {str(member.id) for member in voice.channel.members if not member.bot}
         self.allowed.intersection_update(members)
         self.allowed.update(members)
+        if self.deepgram:
+            for member in voice.channel.members:
+                state = getattr(member, "voice", None)
+                if state:
+                    self.deepgram.set_muted(str(member.id), muted=bool(state.self_mute or state.mute))
+            self.deepgram.prune(members)
 
     def enqueue(self, speech: Speech) -> None:
         if not self.session:
@@ -281,14 +373,15 @@ class Conversation:
         self.work.put_nowait((self.session["id"], speech))
 
     def report_drops(self) -> None:
-        if self.dropped > self.reported_dropped:
+        now = time.monotonic()
+        if self.dropped > self.reported_dropped and now - self.last_drop_report >= DROP_REPORT_SECONDS:
             logging.getLogger("app.conversation").warning(
-                "Dropped %s speech segments because processing could not keep up or work became unavailable "
-                "(total: %s)",
+                "Transcription dropped work %s times (total: %s); audio was discarded or a stream failed",
                 self.dropped - self.reported_dropped,
                 self.dropped,
             )
             self.reported_dropped = self.dropped
+            self.last_drop_report = now
 
     async def monitor(self) -> None:
         tick = 0
@@ -321,6 +414,9 @@ class Conversation:
             except queue.Empty:
                 break
             if not self.session or session_id != self.session["id"]:
+                continue
+            if self.deepgram:
+                self.deepgram.feed(session_id, speaker, pcm, timestamp)
                 continue
             for speech in self.segmenter.feed(speaker, pcm, timestamp):
                 self.enqueue(speech)
@@ -379,7 +475,10 @@ class Conversation:
                     self.settings.transcription_url + ("/transcribe/batch" if len(batch) > 1 else "/transcribe"),
                     data=b"".join(speech.pcm for _, speech in batch),
                     params=params,
-                    headers={"Content-Type": "application/octet-stream"},
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        VOCABULARY_HEADER: encode_hints(self.vocabulary),
+                    },
                 ) as response:
                     if response.status != HTTPStatus.OK:
                         self.error = "Local transcription failed or is still loading; speech was dropped."

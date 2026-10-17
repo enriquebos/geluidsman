@@ -35,6 +35,8 @@ class ConsoleLogs(logging.Handler):
                 settings.discord_client_secret,
                 settings.auth_encryption_key,
                 settings.database_url,
+                settings.deepgram_api_key,
+                settings.transcription_api_token,
             )
             if value.get_secret_value()
         ]
@@ -42,7 +44,7 @@ class ConsoleLogs(logging.Handler):
     def redact(self, message: str) -> str:
         for secret in self.secrets:
             message = message.replace(secret, "[redacted]")
-        message = re.sub(r"(?i)(Bearer|Bot)\s+[\w.\-]+", r"\1 [redacted]", message)
+        message = re.sub(r"(?i)\b(Bearer|Bot|Token)\s+[\w.\-]+", r"\1 [redacted]", message)
         message = re.sub(
             r"(?i)((?:access_token|refresh_token|client_secret|authorization|cookie|code|state)"
             r"[\"']?\s*[:=]\s*[\"']?)[^\s\"'&,}]+",

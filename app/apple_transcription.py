@@ -54,13 +54,13 @@ class AppleModel:
         mx.eval(model.parameters())
         self.decode(np.zeros(16000, dtype=np.float32), "nl")
 
-    def recognize(self, pcm: bytes, language: str) -> dict:
+    def recognize(self, pcm: bytes, language: str, hints: str = "") -> dict:
         if not has_speech(pcm):
             return {"text": "", "language": "nl" if language == "auto" else language}
         audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768
-        return self.decode(audio, language)
+        return self.decode(audio, language, hints)
 
-    def decode(self, audio: np.ndarray, language: str) -> dict:
+    def decode(self, audio: np.ndarray, language: str, hints: str = "") -> dict:
         import mlx_whisper
 
         result = mlx_whisper.transcribe(
@@ -70,6 +70,7 @@ class AppleModel:
             task="transcribe",
             temperature=0.0,
             condition_on_previous_text=False,
+            initial_prompt=hints or None,
             verbose=None,
             fp16=True,
             no_speech_threshold=0.6,

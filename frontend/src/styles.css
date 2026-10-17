@@ -628,3 +628,28 @@ header.topbar.connection-bar { height:auto; min-height:90px; margin:0; padding:1
 .fun-spion { position:absolute; left:50%; top:50%; translate:-50% -50%; width:min(72vw,420px); max-height:75vh; }
 .fun-spion video,.fun-spion img { display:block; width:100%; max-height:75vh; object-fit:contain; border-radius:12px; }
 @media(prefers-reduced-motion:reduce) { .fun-skibidi { animation:none; transform:translate(-50%,-50%); } .skibidi-neck,.skibidi-head { animation:none; } }
+
+.transcription-vocabulary { margin-top:24px; display:flex; flex-direction:column; gap:10px; }
+.transcription-vocabulary textarea { width:100%; min-height:130px; resize:vertical; font:inherit; line-height:1.5; background:#131218; border:1px solid #34303e; color:#eee9f7; border-radius:8px; padding:12px 14px; }
+.transcription-vocabulary textarea::placeholder { color:#696471; }
+.transcription-vocabulary textarea:focus-visible { outline:2px solid var(--accent); outline-offset:4px; }
+.transcription-vocabulary textarea:disabled { opacity:.5; }
+.transcription-vocabulary-actions { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:10px; }
+.transcription-vocabulary-actions span { margin-right:auto; color:var(--muted); font-size:13px; }
+.transcription-term-list { display:grid; gap:12px; margin:16px 0; }
+.transcription-term-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; align-items:center; }
+.transcription-replace-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; gap:12px; align-items:center; }
+.transcription-term-list input { width:100%; min-width:0; }
+.deepgram-settings { border-top:1px solid var(--border); padding-top:24px; margin-top:24px; }
+.deepgram-settings fieldset { border:0; margin:0; padding:0; display:grid; gap:24px; min-width:0; }
+.deepgram-option { display:grid; gap:10px; min-width:0; }
+.deepgram-option p { margin:0; color:var(--muted); line-height:1.6; }
+.transcription-settings .deepgram-option-toggle { display:flex; flex-direction:row; align-items:center; gap:12px; font-weight:600; cursor:pointer; }
+.deepgram-option-toggle input:disabled { opacity:.45; }
+.deepgram-settings a,.transcription-vocabulary a { color:var(--accent); text-decoration:underline; text-underline-offset:3px; }
+.deepgram-option > label:not(.deepgram-option-toggle) { display:grid; gap:8px; max-width:300px; }
+.deepgram-settings > button { margin-top:8px; }
+@media(max-width:600px) { .transcription-replace-row { grid-template-columns:minmax(0,1fr); } .transcription-term-row { gap:8px; } }
+@media(max-width:600px) { .admin-tabs { flex-wrap:wrap; column-gap:16px; row-gap:0; } }
+.transcription-selectors { display:grid; gap:24px; margin-bottom:24px; }
+.deepgram-option .transcription-vocabulary { margin:8px 0 0; padding:16px 0 0; }

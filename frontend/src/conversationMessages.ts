@@ -2,10 +2,10 @@ import { useMemo, useSyncExternalStore } from 'react'
 import { api, APIError } from './types'
 import { liveEvents } from './liveEvents'
 
-export type TranscriptMessage = { id: string; speaker_id: string; speaker_name: string; avatar: string | null; started_at: number; received_order?: number; text: string; language: string }
-type Snapshot = { messages: TranscriptMessage[]; older: boolean; loadingOlder: boolean; denied: boolean; error: string }
-type Page = { items: TranscriptMessage[]; has_older: boolean; has_new?: boolean }
-const empty: Snapshot = { messages: [], older: false, loadingOlder: false, denied: false, error: '' }
+export type TranscriptMessage = { id: string; speaker_id: string; speaker_name: string; avatar: string | null; started_at: number; received_order?: number; interim?: boolean; search_hits?: { query: string; confidence: number }[]; text: string; language: string }
+type Snapshot = { messages: TranscriptMessage[]; interims: TranscriptMessage[]; older: boolean; loadingOlder: boolean; denied: boolean; error: string }
+type Page = { items: TranscriptMessage[]; has_older: boolean; has_new?: boolean; interims?: TranscriptMessage[] }
+const empty: Snapshot = { messages: [], interims: [], older: false, loadingOlder: false, denied: false, error: '' }
 const stores = new Map<string, TranscriptStore>()
 
 class TranscriptStore {
@@ -70,7 +70,7 @@ class TranscriptStore {
         const initial = !this.initialized
         const result = await api<Page>(`/conversations/${encodeURIComponent(this.session)}/messages${initial || !this.cursor ? '' : `?after=${encodeURIComponent(this.cursor)}`}`)
         if (generation !== this.generation || !this.listeners.size) return
-        this.update({ messages: this.merge(result.items), denied: false, error: '', ...(initial ? { older: result.has_older } : {}) })
+        this.update({ messages: this.merge(result.items), interims: result.interims || [], denied: false, error: '', ...(initial ? { older: result.has_older } : {}) })
         if (result.items.length) this.cursor = [...result.items].sort((a, b) => (a.received_order ?? a.started_at) - (b.received_order ?? b.started_at)).at(-1)!.id
         this.initialized = true
         this.pending ||= Boolean(result.has_new)
@@ -101,5 +101,6 @@ export function useConversationMessages(user: string, session: string, eligible:
     return value
   }, [user, session, eligible])
   const snapshot = useSyncExternalStore(store?.subscribe || idleSubscribe, store?.getSnapshot || emptySnapshot)
-  return { ...snapshot, loadOlder: store?.loadOlder }
+  const messages = useMemo(() => [...new Map([...snapshot.messages, ...snapshot.interims].map(item => [item.id, item])).values()].sort((a, b) => a.started_at - b.started_at || a.id.localeCompare(b.id)), [snapshot.messages, snapshot.interims])
+  return { ...snapshot, messages, loadOlder: store?.loadOlder }
 }

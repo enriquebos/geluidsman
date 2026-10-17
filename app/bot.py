@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 import discord
-from discord.ext.voice_recv import VoiceRecvClient
 
+from app.discord_voice import VoiceRecvClient
 from app.fun import SOUND_EFFECTS, FunSettings, KirbyGuard
 from app.mixer import Mixer
 
@@ -365,11 +365,17 @@ class Bot:
         ) -> None:
             await self.voice_state_changed(member, before, after)
 
+    def transcription_mute_changed(self, member: discord.Member, state: discord.VoiceState) -> None:
+        receiver = self.state.receiver
+        if receiver and receiver.deepgram and str(member.id) in receiver.allowed:
+            receiver.deepgram.set_muted(str(member.id), muted=bool(state.self_mute or state.mute))
+
     async def voice_state_changed(
         self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
     ) -> None:
         if member.guild.id == self.settings.discord_guild_id and not member.bot:
             self.events.publish("status")
+            self.transcription_mute_changed(member, after)
         if self.actions:
             self.actions.receive(member, before, after)
             if self.client.user and member.id == self.client.user.id and before.channel != after.channel:

@@ -114,3 +114,30 @@ test('transcript scrollbars keep reading position and follow only at the bottom'
   await page.keyboard.press('Escape')
   await expect(page.getByRole('dialog', { name: 'Live conversation chat' })).toHaveCount(0)
 })
+
+test('interim speech updates in place and becomes one final message', async ({ page }) => {
+  await page.addInitScript(() => {
+    const sources: EventTarget[] = []
+    class FakeEvents extends EventTarget { constructor(_url: string) { super(); sources.push(this) }; close() {} }
+    Object.assign(window, { EventSource: FakeEvents, conversationSources: sources })
+  })
+  const draft = { id: 'draft', speaker_id: '100', speaker_name: 'Me', avatar: null, started_at: 100, text: 'narebet', language: 'nl', interim: true }
+  let final = false
+  await page.route('**/api/conversations/status', route => route.fulfill({ json: status }))
+  await page.route('**/api/conversations/floating/messages*', route => route.fulfill({ json: { session, has_older: false, items: final ? [{ ...draft, text: 'Naar bed.', interim: false }] : [], interims: final ? [] : [draft] } }))
+  await page.goto('/conversation')
+  const transcript = page.locator('.conversation-page').getByRole('log')
+  await expect(transcript.locator('article')).toHaveCount(1)
+  await expect(transcript).toContainText('narebet')
+  await expect(transcript).toContainText('Recognizing…')
+  draft.text = 'Naar bed'
+  const refresh = () => page.evaluate(() => { (window as unknown as { conversationSources: EventTarget[] }).conversationSources.forEach(source => source.dispatchEvent(new MessageEvent('conversation', { data: JSON.stringify({ session_id: 'floating' }) }))) })
+  await refresh()
+  await expect(transcript).toContainText('Naar bed')
+  await expect(transcript.locator('article')).toHaveCount(1)
+  final = true
+  await refresh()
+  await expect(transcript).toContainText('Naar bed.')
+  await expect(transcript).not.toContainText('Recognizing…')
+  await expect(transcript.locator('article')).toHaveCount(1)
+})

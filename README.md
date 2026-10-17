@@ -157,6 +157,26 @@ word error in the same 17-word reference. This sample supports choosing Turbo
 for latency, but does not establish accuracy for noisy Discord audio.
 Use a user-controlled voice test to compare both models on your own microphones.
 
+## Transcription vocabulary hints
+
+Admin → Settings → Transcription includes a shared Vocabulary hints field. Enter
+correct spellings of names, nicknames, slang and phrases, one per line or separated
+by commas. Start with 10–20 relevant terms and keep the list within 500 characters.
+Click Save vocabulary hints to apply it to new speech segments. Clear hints empties
+the editor; save afterward to disable them. The default list is empty.
+
+Hints are stored in PostgreSQL and survive app, worker and model restarts. They work
+with both the Apple MLX and CPU/NVIDIA backends, without a model reload. Each speaker's
+segment receives the same short initial prompt; previous transcripts are not added
+to it. The prompt helps choose spellings when audio is ambiguous, but does not force
+matches, train the model or repair clipped speech. Compare recognition with and
+without hints on real examples. Silence filtering remains active.
+
+Only administrators can read or change the list. The worker receives bounded hints
+in a header on the private worker connection, not in request URLs, health status,
+logs or SSE events. The native Apple worker also requires its existing shared token. The dashboard tracks unsaved vocabulary edits for its
+existing update/reload warning. The list can be saved while the model is unavailable.
+
 ## Command shortcuts
 
 Optional [Just](https://just.systems/man/en/packages.html) shortcuts are defined in
@@ -803,3 +823,25 @@ Admin Fun includes a default-off Brr Brr Patapim switch. Protected sound ID `75d
 The default-off Tung sahur Fun toggle binds protected sound ID `1e5721474c58461ebfd99751b681bb3b`. Eligible voice-channel viewers see the wooden character enter, swing his bat and crack a decorative screen overlay, then leave within six seconds. Each playback has its own effect instance; nothing changes the real page or blocks clicks. Reduced motion shows a static character and cracks.
 
 Default-off Skibidi and Spion Fun toggles use protected sound IDs `abfeb407046948a2a78a0e693bd35bfa` and `5592b9d7f19a418796c2c8a47dcefe52`. Skibidi's SVG toilet appears for six seconds with a bobbing, twisting head. Spion plays the supplied five-second GIF as a compact local muted MP4 once at screen center, seeking to server-measured playback age and disappearing at animation end regardless of sound length. Reduced motion uses a still Spion poster and a static Skibidi. Existing audience filtering, instance bounds and preview exclusions apply.
+
+### Deepgram Nova-3 streaming
+
+Set `TRANSCRIPTION_PROVIDER=deepgram` and `DEEPGRAM_API_KEY` in the ignored `.env`, and run `just update`. Keep your existing local Compose override to leave the local worker available. Admin → Conversation → Transcription provider switches between Local and API · Deepgram Nova-3 and saves the choice across restarts. A switch is rejected if the requested local worker is unavailable or the API key is missing. The app connects directly to Deepgram; no local GPU worker or Deepgram SDK is required. The environment provider is the initial default; the saved admin choice takes precedence. Use `COMPOSE_FILE=compose.yaml:compose.cloud.yaml` only for an API-only installation without a local worker. Existing local model selections and caches are retained.
+
+Each Discord speaker has a separate Nova-3 WebSocket, with mono 16 kHz PCM and an explicit Dutch language by default. English and multilingual mode remain available through the conversation language control. Audio is processed in bounded memory and sent to Deepgram; audio and transcript text are not logged. Cloud processing incurs Deepgram API charges. At most 16 speaker connections run simultaneously, each with a 128-packet queue; account concurrency limits can be lower. Connections close after five seconds without incoming Discord audio, and failed connections back off for 15 seconds. Silence or continuous microphone noise can keep a connection active and billable.
+
+Preliminary text appears with a Recognizing label and is replaced as recognition improves. Only completed utterances are stored in the live conversation and evaluated for triggers. Interim text stays in bounded memory, is available only through the authenticated live-transcript API, and never travels inside SSE events. Disconnecting or disabling recording cancels streams and clears partial text. Saved vocabulary hints are passed as individual Nova-3 keyterms, including multi-word phrases; editing hints updates active connections.
+
+### Conversation API options
+
+Admin → Conversation contains provider/model/language selection and Deepgram settings. Individual Vocabulary hint inputs sit under Keyterm Prompting. English (`en`), Dutch (`nl`) and Multilingual (`multi`) are available; multilingual maps to automatic language detection for the local provider. Existing newline/comma-separated hints load into individual inputs; saving preserves the shared hints setting used by local prompts and API keyterms. Keyterm Prompting can be disabled for the API without deleting the saved vocabulary. Local and API are exclusive providers: API failures never switch to local automatically.
+
+Self-mute or server mute closes only that user’s API stream and removes their partial text immediately. Unmuting allows the next audio packet to start a stream once ten seconds have elapsed since the latest mute transition. Repeated notifications of the same mute state do not extend the cooldown. Other speakers continue normally.
+
+API options include Smart Format, interim results, Utterance End (1000–5000 ms, requiring interim results), endpointing (0–5000 ms or disabled), keyterms, diarization (`latest`/`v1`), punctuation, profanity filtering, redaction, find/replace, acoustic search with confidence metadata beneath final messages, speech-start events, English-only dictation and numerals. Legacy Keywords is omitted because Nova-3 uses keyterms. Each control links to its official documentation. Saving API options persists them and restarts API streams. Defaults retain the previous behavior; enabling formatting, filtering or replacements can alter trigger text. Discord user attribution remains independent of diarization within a microphone stream.
+
+Deepgram final-result deduplication follows recognized word timestamps within each speaker stream. Replayed final/flush results for the same audio do not create another chat message or trigger sounds twice, even when their surrounding audio-window durations differ. Repeated words spoken at later timestamps remain separate speech. Stale utterance-end events cannot finalize a newer utterance.
+
+Runtime diagnostics distinguish expected HTTP rejections from server failures: normal 4xx responses are informational, rate limits are warnings, and 5xx responses are errors. Playback capacity retains its specific warning. Transcription drop warnings aggregate at most once every 30 seconds; the counter includes discarded audio packets, speech segments and failed streams, rather than measuring lost utterances. Audio arriving during a failed API stream's 15-second retry delay does not increment the counter for every packet. Deepgram diagnostics include HTTP rejection or abnormal WebSocket close codes without logging provider payloads, vocabulary, transcripts or credentials. Sender failures immediately stop their matching receiver and enter the same bounded retry delay.
+
+PostgreSQL connection establishment tolerates a short database restart with up to six attempts, three-second connection timeouts and one-second gaps. Schema initialization and job recovery are never retried by this loop. Discord participant departure cleanup also handles recording being stopped, preventing an absent audio reader from crashing the voice WebSocket poller. Isolated Discord packet decryption or jitter-buffer losses can still occur during network interruptions; their presence alone does not trigger a voice reconnect.

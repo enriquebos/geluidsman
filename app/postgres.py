@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
@@ -12,6 +14,12 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from app.types import SQLParameters
+
+
+logger = logging.getLogger(__name__)
+CONNECT_ATTEMPTS = 6
+CONNECT_TIMEOUT = 3
+CONNECT_RETRY_SECONDS = 1
 
 
 class Cursor:
@@ -27,7 +35,20 @@ class Cursor:
 
 class Connection:
     def __init__(self, url: str) -> None:
-        self.raw = psycopg.connect(url, autocommit=True, row_factory=dict_row)
+        for attempt in range(CONNECT_ATTEMPTS):
+            try:
+                self.raw = psycopg.connect(url, autocommit=True, row_factory=dict_row, connect_timeout=CONNECT_TIMEOUT)
+            except psycopg.OperationalError as error:
+                if attempt + 1 == CONNECT_ATTEMPTS or (
+                    error.sqlstate is not None and not (error.sqlstate.startswith("08") or error.sqlstate == "57P03")
+                ):
+                    raise
+                logger.info(
+                    "PostgreSQL is unavailable; retrying the initial connection (%s/%s)", attempt + 2, CONNECT_ATTEMPTS
+                )
+                time.sleep(CONNECT_RETRY_SECONDS)
+            else:
+                break
         self.transactions = []
 
     def __enter__(self) -> Self:

@@ -293,7 +293,8 @@ def test_all_time_leaderboard_survives_audit_cleanup_and_restart(client: TestCli
     data = client.get("/api/audit/leaderboard").json()
     assert data["leaderboard"][0]["created"] == 1
     assert data["leaderboard"][0]["played"] == 1
-    db.conn.executescript(Path(__file__).parents[1].joinpath("app/schema_sqlite.sql").read_text(encoding="utf-8"))
+    with db.lock:
+        db.conn.executescript(Path(__file__).parents[1].joinpath("app/schema_sqlite.sql").read_text(encoding="utf-8"))
     assert client.get("/api/audit/leaderboard").json() == data
     assert client.get("/api/audit/leaderboard", params={"sort": "unknown"}).status_code == 422
     db.execute("UPDATE users SET permission_overrides=? WHERE id=?", ('{"view_audit":false}', "100"))
@@ -307,7 +308,8 @@ def test_sound_rankings_survive_audit_cleanup_and_restart(client: TestClient) ->
     db.audit("100", "sound.play", "ranked", outcome="rejected", guild_id="1352422295402057759")
     db.audit("100", "sound.play", "ranked", guild_id="999")
     db.execute("DELETE FROM audit")
-    db.conn.executescript(Path(__file__).parents[1].joinpath("app/schema_sqlite.sql").read_text(encoding="utf-8"))
+    with db.lock:
+        db.conn.executescript(Path(__file__).parents[1].joinpath("app/schema_sqlite.sql").read_text(encoding="utf-8"))
     rows = db.rows(
         "SELECT * FROM sound_play_totals WHERE resource_id=? AND guild_id=?", ("ranked", "1352422295402057759")
     )

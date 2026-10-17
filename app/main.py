@@ -201,8 +201,13 @@ def register_private_responses(app: FastAPI) -> None:
             )
             raise
         if response.status_code >= status.HTTP_400_BAD_REQUEST:
-            logging.getLogger("app.http").warning(
-                "%s %s returned %s", request.method, request.url.path, response.status_code
+            level = logging.INFO
+            if response.status_code >= status.HTTP_500_INTERNAL_SERVER_ERROR:
+                level = logging.ERROR
+            elif response.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+                level = logging.WARNING
+            logging.getLogger("app.http").log(
+                level, "%s %s returned %s", request.method, request.url.path, response.status_code
             )
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "private, no-store"
@@ -217,6 +222,8 @@ def register_state_routes(app: FastAPI, settings: Settings) -> None:
     async def value_error(_request: Request, exc: ValueError) -> JSONResponse:
         if isinstance(exc, CapacityError):
             logging.getLogger("app.http").warning("Playback capacity reached: %s", exc)
+        elif isinstance(exc, VoiceError):
+            logging.getLogger("app.http").info("Voice operation unavailable: %s", exc)
         else:
             logging.getLogger("app.http").error("Operation failed", exc_info=exc)
         status = 409 if isinstance(exc, CapacityError) else 400

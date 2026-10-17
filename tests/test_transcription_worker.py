@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app import transcription_worker as worker
 from app.conversation import Conversation
+from app.transcription_vocabulary import VOCABULARY_HEADER, encode_hints
 
 
 @pytest.fixture
@@ -54,7 +55,10 @@ def test_busy_and_loading(client: TestClient) -> None:
 
 
 @pytest.mark.parametrize("language", ["nl", "auto"])
-def test_batch_mapping_uses_separate_features_and_languages(monkeypatch: pytest.MonkeyPatch, language: str) -> None:
+@pytest.mark.parametrize("hints", ["", "Zoë, Sjoerd"])
+def test_batch_mapping_uses_separate_features_and_languages(
+    monkeypatch: pytest.MonkeyPatch, language: str, hints: str
+) -> None:
     calls = []
 
     class Pipeline:
@@ -87,7 +91,8 @@ def test_batch_mapping_uses_separate_features_and_languages(monkeypatch: pytest.
     )
     first = np.full(161, 1000, dtype=np.int16).tobytes()
     second = np.full(320, 2000, dtype=np.int16).tobytes()
-    result = worker.recognize_many([first, second], language)
+    result = worker.recognize_many([first, second], language, hints)
+    assert all(options["initial_prompt"] == (hints or None) for _, options in calls)
     if language == "auto":
         assert result == [{"text": "speaker 0", "language": "nl"}, {"text": "speaker 0", "language": "en"}]
         assert len(calls) == 2
@@ -170,3 +175,34 @@ def test_apple_startup_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("TRANSCRIPTION_API_TOKEN", raising=False)
     with pytest.raises(RuntimeError, match="requires TRANSCRIPTION_API_TOKEN"), TestClient(worker.app):
         pass
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_vocabulary_reaches_inference_without_persisting(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, *, batch: bool
+) -> None:
+    hints = "Zoë, Sjoerd"
+    inference = Mock(
+        return_value=[{"text": "hello", "language": "nl"}] if batch else {"text": "hello", "language": "nl"}
+    )
+    monkeypatch.setattr(worker, "recognize_many" if batch else "recognize", inference)
+    path = "/transcribe/batch?lengths=2&lengths=2" if batch else "/transcribe"
+    body = b"aaaa" if batch else b"aa"
+    response = client.post(path, content=body, headers={VOCABULARY_HEADER: encode_hints(hints)})
+    assert response.status_code == 200
+    assert inference.call_args.args == ([b"aa", b"aa"] if batch else b"aa", "nl", hints)
+    assert hints not in client.get("/health").text
+    inference.reset_mock()
+    assert client.post(path, content=body, headers={VOCABULARY_HEADER: encode_hints("x" * 501)}).status_code == 422
+    inference.assert_not_called()
+
+
+def test_cpu_single_decoder_receives_vocabulary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRANSCRIPTION_DEVICE", "cpu")
+    model = SimpleNamespace(
+        transcribe=Mock(return_value=(iter([SimpleNamespace(text="hello")]), SimpleNamespace(language="nl")))
+    )
+    monkeypatch.setattr(worker.app.state, "model", model, raising=False)
+    assert worker.recognize(b"aa", "nl", "Zoë, Sjoerd")["text"] == "hello"
+    assert model.transcribe.call_args.kwargs["initial_prompt"] == "Zoë, Sjoerd"
+    assert not model.transcribe.call_args.kwargs["condition_on_previous_text"]

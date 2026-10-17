@@ -8,17 +8,54 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import discord
 import numpy as np
 import pytest
-from discord.ext.voice_recv import VoiceRecvClient
+from discord.ext.voice_recv.gateway import hook
 from pydantic import SecretStr
 
 from app.bot import VOICE_HANDSHAKE_TIMEOUT, VOICE_RECOVERY_GRACE, Bot, VoiceError
 from app.config import Settings
 from app.db import Database
+from app.discord_voice import VoiceRecvClient
 from app.events import Events
 from app.mixer import Mixer
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.parametrize("receiver_state", ["absent", "active", "stopping"])
+@pytest.mark.parametrize("ssrc", [0, 123])
+def test_voice_member_leave_clears_mapping_with_or_without_receiver(receiver_state: str, ssrc: int) -> None:
+    async def scenario() -> None:
+        voice = VoiceRecvClient.__new__(VoiceRecvClient)
+        voice._id_to_ssrc = {100: ssrc, 200: 456}
+        voice._ssrc_to_id = {ssrc: 100, 456: 200}
+        reader = Mock()
+        voice._reader = discord.utils.MISSING if receiver_state == "absent" else reader
+        voice.channel = Mock()
+        voice.dispatch = Mock()
+        if receiver_state == "stopping":
+            reader.packet_router.destroy_decoder.side_effect = lambda _: setattr(
+                voice, "_reader", discord.utils.MISSING
+            )
+        websocket = Mock(READY=2, SESSION_DESCRIPTION=4, SPEAKING=5)
+        websocket._connection.voice_client = voice
+        await hook(websocket, {"op": 13, "d": {"user_id": "100"}})
+        assert voice._id_to_ssrc == {200: 456}
+        assert voice._ssrc_to_id == {456: 200}
+        voice.dispatch.assert_called_once_with("voice_member_disconnect", voice.guild.get_member.return_value, ssrc)
+        if receiver_state == "absent":
+            reader.packet_router.destroy_decoder.assert_not_called()
+        else:
+            reader.packet_router.destroy_decoder.assert_called_once_with(ssrc)
+        if receiver_state == "active":
+            reader.speaking_timer.drop_ssrc.assert_called_once_with(ssrc)
+        else:
+            reader.speaking_timer.drop_ssrc.assert_not_called()
+        await hook(websocket, {"op": 13, "d": {"user_id": "100"}})
+        assert voice._id_to_ssrc == {200: 456}
+        assert voice._ssrc_to_id == {456: 200}
+
+    asyncio.run(scenario())
 
 
 def test_idle_voice_stream_pauses_and_resumes_without_restarting(tmp_path: Path) -> None:
@@ -511,6 +548,37 @@ def test_startup_waits_for_reported_disconnect_before_reconnect(tmp_path: Path) 
         await task
         bot.state.connect.assert_awaited_once_with("123")
         await bot.close()
+        db.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("self_mute", "server_mute"), [(True, False), (False, True), (False, False)])
+def test_voice_mute_events_reach_only_active_api_participants(
+    tmp_path: Path, *, self_mute: bool, server_mute: bool
+) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "mute.sqlite3")
+        settings = Settings(_env_file=None, discord_token=SecretStr(""), data_dir=tmp_path)
+        bot = Bot(settings, db, Events())
+        api = Mock()
+        receiver = Mock(deepgram=api, allowed={"100"}, close_session=AsyncMock())
+        bot.state.receiver = receiver
+        member = Mock(id=100, bot=False)
+        member.guild.id = settings.discord_guild_id
+        before = Mock(self_mute=False, mute=False)
+        after = Mock(self_mute=self_mute, mute=server_mute)
+        await bot.voice_state_changed(member, before, after)
+        api.set_muted.assert_called_once_with("100", muted=self_mute or server_mute)
+        api.reset_mock()
+        member.guild.id = 123
+        await bot.voice_state_changed(member, before, after)
+        api.set_muted.assert_not_called()
+        member.guild.id = settings.discord_guild_id
+        receiver.deepgram = None
+        await bot.voice_state_changed(member, before, after)
+        api.set_muted.assert_not_called()
+        await bot.client.close()
         db.close()
 
     asyncio.run(scenario())

@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from requests import RequestException
 
 from app.transcription_models import DUTCH_MODEL, ModelSelection, convert_dutch_model, model_path
+from app.transcription_vocabulary import VOCABULARY_HEADER, decode_hints
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -166,9 +167,9 @@ async def select_model(body: ModelInput) -> dict:
     return health()
 
 
-def recognize_many(items: list[bytes], language: str = "nl") -> list[dict]:
+def recognize_many(items: list[bytes], language: str = "nl", hints: str = "") -> list[dict]:
     if os.environ.get("TRANSCRIPTION_DEVICE") == "mlx":
-        return [recognize(pcm, language) for pcm in items]
+        return [recognize(pcm, language, hints) for pcm in items]
     from faster_whisper import BatchedInferencePipeline
     from faster_whisper.vad import VadOptions, collect_chunks, get_speech_timestamps
 
@@ -202,6 +203,7 @@ def recognize_many(items: list[bytes], language: str = "nl") -> list[dict]:
             beam_size=5,
             vad_filter=False,
             condition_on_previous_text=False,
+            initial_prompt=hints or None,
             clip_timestamps=clips,
             batch_size=MAX_BATCH,
         )
@@ -213,9 +215,10 @@ def recognize_many(items: list[bytes], language: str = "nl") -> list[dict]:
     return results
 
 
-def recognize(pcm: bytes, language: str = "nl") -> dict:
+def recognize(pcm: bytes, language: str = "nl", hints: str = "") -> dict:
     if os.environ.get("TRANSCRIPTION_DEVICE") == "mlx":
-        return app.state.model.recognize(pcm, language)
+        arguments = (language, hints) if hints else (language,)
+        return app.state.model.recognize(pcm, *arguments)
     audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768
     segments, info = app.state.model.transcribe(
         audio,
@@ -224,6 +227,7 @@ def recognize(pcm: bytes, language: str = "nl") -> dict:
         beam_size=5,
         vad_filter=True,
         condition_on_previous_text=False,
+        initial_prompt=hints or None,
     )
     text = " ".join(segment.text.strip() for segment in segments).strip()[:4000]
     return {"text": text, "language": info.language}
@@ -238,23 +242,32 @@ async def read_audio(request: Request, maximum: int) -> bytes:
     return bytes(pcm)
 
 
-async def infer(items: list[bytes], language: str) -> list[dict]:
+def request_hints(request: Request) -> str:
+    try:
+        return decode_hints(request.headers.get(VOCABULARY_HEADER, ""))
+    except ValueError as error:
+        raise HTTPException(422, "Invalid vocabulary hints.") from error
+
+
+async def infer(items: list[bytes], language: str, hints: str = "") -> list[dict]:
     if app.state.model is None or app.state.target is not None:
         raise HTTPException(503, "Transcription model is unavailable or still loading.")
     if app.state.lock.locked():
         raise HTTPException(503, "Transcription worker is busy.")
     async with app.state.lock:
+        arguments = (language, hints) if hints else (language,)
         if len(items) == 1:
-            return [await asyncio.to_thread(recognize, items[0], language)]
-        return await asyncio.to_thread(recognize_many, items, language)
+            return [await asyncio.to_thread(recognize, items[0], *arguments)]
+        return await asyncio.to_thread(recognize_many, items, *arguments)
 
 
 @app.post("/transcribe")
 async def transcribe(request: Request, language: Literal["nl", "en", "auto"] = "nl") -> dict:
+    hints = request_hints(request)
     pcm = await read_audio(request, MAX_AUDIO_BYTES)
     if not pcm or len(pcm) % 2:
         raise HTTPException(422, "Expected mono 16 kHz signed 16-bit PCM.")
-    return (await infer([pcm], language))[0]
+    return (await infer([pcm], language, hints))[0]
 
 
 @app.post("/transcribe/batch")
@@ -265,6 +278,7 @@ async def transcribe_batch(
 ) -> dict:
     if any(length <= 0 or length > MAX_AUDIO_BYTES or length % 2 for length in lengths):
         raise HTTPException(422, "Each audio segment must be bounded mono 16 kHz signed 16-bit PCM.")
+    hints = request_hints(request)
     pcm = await read_audio(request, sum(lengths))
     if len(pcm) != sum(lengths):
         raise HTTPException(422, "Audio lengths do not match the request body.")
@@ -273,7 +287,7 @@ async def transcribe_batch(
     for length in lengths:
         items.append(pcm[offset : offset + length])
         offset += length
-    return {"results": await infer(items, language)}
+    return {"results": await infer(items, language, hints)}
 
 
 if __name__ == "__main__":

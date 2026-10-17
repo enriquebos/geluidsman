@@ -10,12 +10,15 @@ from unittest.mock import AsyncMock, Mock
 import discord
 import numpy as np
 import pytest
+from pydantic import SecretStr
 
 from app.config import Settings
 from app.conversation import MAX_QUEUE, Conversation, matches
 from app.conversation_audio import MAX_CHUNK_SECONDS, SAMPLE_RATE, SILENCE_SECONDS, ReceiveSink, Segmenter, Speech
 from app.db import Database
+from app.deepgram_transcription import DeepgramStreams, SpeakerStream
 from app.events import Events
+from app.transcription_vocabulary import VOCABULARY_HEADER, decode_hints
 from app.trigger_playback import PlaybackContext
 from tests.test_auth import client as auth_fixture
 from tests.test_auth import headers
@@ -629,6 +632,7 @@ def test_batch_speakers_keep_identity_and_discard_disconnected_results(tmp_path:
     async def scenario() -> None:
         db = Database(tmp_path / "batch.sqlite3")
         value = manager(db)
+        value.vocabulary = "Zoë, Sjoerd"
         await value.synchronize()
         value.fire_triggers = AsyncMock()
         response = Mock(status=200)
@@ -655,6 +659,7 @@ def test_batch_speakers_keep_identity_and_discard_disconnected_results(tmp_path:
         assert value.http.post.call_count == 1
         assert value.http.post.call_args.args[0].endswith("/transcribe/batch")
         assert value.http.post.call_args.kwargs["data"] == b"100200"
+        assert decode_hints(value.http.post.call_args.kwargs["headers"][VOCABULARY_HEADER]) == "Zoë, Sjoerd"
         messages = db.rows("SELECT * FROM conversation_messages ORDER BY speaker_id")
         if disconnected:
             assert not messages
@@ -1020,3 +1025,177 @@ def test_incremental_messages_include_late_speech_and_recheck_permissions(client
     assert client.get("/api/conversations/delta/messages?after=first&before=second").status_code == 422
     db.execute("UPDATE users SET permission_overrides=? WHERE id='100'", ('{"view_conversations":false}',))
     assert client.get("/api/conversations/delta/messages?after=second").status_code == 403
+
+
+def test_vocabulary_admin_permissions_persistence_validation_and_clear(client: TestClient) -> None:
+    user = login(client)
+    endpoint = "/api/admin/transcription/vocabulary"
+    assert client.get(endpoint).status_code == 403
+    assert client.put(endpoint, json={"hints": "Enrique"}, headers=headers(user)).status_code == 403
+    client.app.state.auth.admin_ids = {"100"}
+    user = client.get("/api/auth/me").json()
+    assert client.get(endpoint).json() == {"hints": ""}
+    assert client.put(endpoint, json={"hints": "Enrique"}).status_code == 403
+    response = client.put(endpoint, json={"hints": " Zoë \n\n Brr   Brr Patapim "}, headers=headers(user))
+    assert response.status_code == 200
+    hints = "Zoë\nBrr Brr Patapim"
+    assert response.json() == {"hints": hints}
+    db = client.app.state.db
+    assert db.setting("transcription_vocabulary") == hints
+    assert client.get(endpoint).json() == {"hints": hints}
+    assert manager(db).vocabulary == hints
+    for invalid in ("x" * 501, "Name\x00"):
+        assert client.put(endpoint, json={"hints": invalid}, headers=headers(user)).status_code == 422
+    assert db.setting("transcription_vocabulary") == hints
+    audits = db.rows("SELECT details FROM audit WHERE action='settings.edit'")
+    assert "Zoë" not in str(audits)
+    assert client.put(endpoint, json={"hints": ""}, headers=headers(user)).json() == {"hints": ""}
+    assert db.setting("transcription_vocabulary") == ""
+    assert client.app.state.conversation.vocabulary == ""
+
+
+def test_admin_provider_switch_requires_key_and_ready_worker_and_persists(client: TestClient) -> None:
+    user = login(client)
+    endpoint = "/api/admin/transcription/provider"
+    assert client.put(endpoint, json={"provider": "deepgram"}, headers=headers(user)).status_code == 403
+    client.app.state.auth.admin_ids = {"100"}
+    user = client.get("/api/auth/me").json()
+    assert client.put(endpoint, json={"provider": "deepgram"}).status_code == 403
+    assert client.put(endpoint, json={"provider": "unknown"}, headers=headers(user)).status_code == 422
+    assert client.put(endpoint, json={"provider": "deepgram"}, headers=headers(user)).status_code == 409
+    value = client.app.state.conversation
+    value.settings.deepgram_api_key = SecretStr("test-key")
+    response = client.put(endpoint, json={"provider": "deepgram"}, headers=headers(user))
+    assert response.status_code == 200
+    assert response.json()["model"] == "nova-3"
+    assert "test-key" not in str(response.json())
+    db = client.app.state.db
+    assert db.setting("transcription_provider") == "deepgram"
+    assert manager(db).provider == "deepgram"
+    assert db.setting("transcription_model", "large-v3-turbo") == "large-v3-turbo"
+    worker = Mock()
+    worker.json = AsyncMock(return_value={"ready": False})
+    context = AsyncMock()
+    context.__aenter__.return_value = worker
+    value.http = Mock(get=Mock(return_value=context), close=AsyncMock())
+    assert client.put(endpoint, json={"provider": "local"}, headers=headers(user)).status_code == 409
+    assert value.provider == "deepgram"
+    worker.json.return_value = {"ready": True, "model": "large-v3-turbo", "models": ["large-v3-turbo"]}
+    assert client.put(endpoint, json={"provider": "local"}, headers=headers(user)).status_code == 200
+    assert db.setting("transcription_provider") == "local"
+    assert value.deepgram is None
+
+
+def test_interim_api_rechecks_live_transcript_permissions(client: TestClient) -> None:
+    login(client)
+    db = client.app.state.db
+    db.execute(
+        "UPDATE users SET permission_overrides=? WHERE id='100'",
+        ('{"view_conversations":true,"always_live_conversation":true}',),
+    )
+    db.execute("INSERT INTO conversations(id,channel_id,channel_name,started_at) VALUES ('partial','123','Voice',1)")
+    value = client.app.state.conversation
+    value.session = db.one("SELECT * FROM conversations WHERE id='partial'")
+    value.deepgram = DeepgramStreams(value)
+    value.deepgram.interims["100"] = {"id": "draft", "speaker_id": "100", "text": "Naar bed", "interim": True}
+    response = client.get("/api/conversations/partial/messages")
+    assert response.status_code == 200
+    assert response.json()["interims"][0]["text"] == "Naar bed"
+    assert not db.rows("SELECT * FROM conversation_messages")
+    db.execute("UPDATE users SET permission_overrides=? WHERE id='100'", ('{"view_conversations":true}',))
+    assert client.get("/api/conversations/partial/messages").status_code == 403
+
+
+def test_deepgram_options_permissions_validation_persistence_and_private_audit(client: TestClient) -> None:
+    user = login(client)
+    endpoint = "/api/admin/transcription/deepgram"
+    assert client.get(endpoint).status_code == 403
+    assert client.put(endpoint, json={}, headers=headers(user)).status_code == 403
+    client.app.state.auth.admin_ids = {"100"}
+    user = client.get("/api/auth/me").json()
+    assert client.get(endpoint).json()["endpointing_ms"] == 300
+    assert client.put(endpoint, json={}, headers={}).status_code == 403
+    body = {
+        "smart_format": True,
+        "find_replace": True,
+        "replacements": [{"find": "NaReBeT", "replacement": "Naar bed"}],
+        "search": True,
+        "search_terms": [" Naar bed "],
+    }
+    response = client.put(endpoint, json=body, headers=headers(user))
+    assert response.status_code == 200
+    assert response.json()["replacements"][0]["find"] == "narebet"
+    assert client.get(endpoint).json()["search_terms"] == ["Naar bed"]
+    db = client.app.state.db
+    assert manager(db).deepgram_options.smart_format is True
+    for invalid in (
+        {"utterance_end_ms": 999},
+        {"endpointing_ms": 5001},
+        {"diarize_model": "v2"},
+        {"search_terms": ["x"] * 51},
+        {"replacements": [{"find": "x:y", "replacement": "z"}]},
+        {"search_terms": ["name\x00"]},
+        {"unexpected": True},
+    ):
+        assert client.put(endpoint, json=invalid, headers=headers(user)).status_code == 422
+    assert db.setting("deepgram_options")["smart_format"] is True
+    audits = db.rows("SELECT details FROM audit WHERE action='settings.edit'")
+    assert "Naar bed" not in str(audits)
+
+
+def test_admin_language_selection_permissions_and_multilingual_mapping(client: TestClient) -> None:
+    user = login(client)
+    endpoint = "/api/admin/transcription/language"
+    assert client.put(endpoint, json={"language": "en"}, headers=headers(user)).status_code == 403
+    client.app.state.auth.admin_ids = {"100"}
+    user = client.get("/api/auth/me").json()
+    assert client.put(endpoint, json={"language": "en"}).status_code == 403
+    assert client.put(endpoint, json={"language": "de"}, headers=headers(user)).status_code == 422
+    for language, canonical in (("en", "en"), ("multi", "auto"), ("nl", "nl")):
+        response = client.put(endpoint, json={"language": language}, headers=headers(user))
+        assert response.status_code == 200
+        assert response.json() == {"language": language}
+        assert client.app.state.db.setting("conversation_language") == canonical
+        assert client.app.state.conversation.language == canonical
+
+
+def test_deepgram_replay_inserts_and_triggers_once_per_spoken_word(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "replay.sqlite3")
+        value = manager(db)
+        value.deepgram = DeepgramStreams(value)
+        await value.synchronize()
+        value.fire_triggers = AsyncMock()
+        session_id = value.session["id"]
+        stream = SpeakerStream(("100", "Owner", None), session_id, time.time(), configuration=("nl", ""))
+        result = {
+            "type": "Results",
+            "start": 0,
+            "duration": 0.5,
+            "is_final": True,
+            "speech_final": True,
+            "channel": {
+                "alternatives": [
+                    {
+                        "transcript": "Oh.",
+                        "languages": ["nl"],
+                        "words": [
+                            {"word": "oh", "punctuated_word": "Oh.", "start": 0.1, "end": 0.3},
+                        ],
+                    }
+                ]
+            },
+        }
+        await value.deepgram.result(stream, result)
+        await value.deepgram.result(stream, {**result, "duration": 1.5, "from_finalize": True})
+        assert len(db.rows("SELECT * FROM conversation_messages")) == 1
+        assert value.fire_triggers.await_count == 1
+        result["channel"]["alternatives"][0]["words"][0].update(start=1.6, end=1.8)
+        result["duration"] = 2
+        await value.deepgram.result(stream, result)
+        assert len(db.rows("SELECT * FROM conversation_messages")) == 2
+        assert value.fire_triggers.await_count == 2
+        await value.close_session()
+        db.close()
+
+    asyncio.run(scenario())
