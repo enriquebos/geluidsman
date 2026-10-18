@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -205,3 +206,67 @@ def test_ignore_channel_hides_alerts_preserves_history_and_survives_restart(tmp_
     assert db.jobs() == []
     assert db.one("SELECT id FROM channel_items WHERE batch_id='batch'")
     db.close()
+
+
+def test_pause_during_committed_item_keeps_it_and_leaves_remaining_items_queued(tmp_path: Path) -> None:
+    async def verify() -> None:
+        settings = Settings(_env_file=None, data_dir=tmp_path)
+        db = Database(tmp_path / "pause-commit.sqlite3")
+        media = Media(settings, db, Events())
+        batch = "batch"
+        db.execute(
+            "INSERT INTO channel_batches(id,url,title,status,created_at) VALUES (?,?,?,?,?)",
+            (batch, "https://www.youtube.com/@test/videos", "Channel", "running", 0),
+        )
+        for letter in "ab":
+            db.execute(
+                "INSERT INTO channel_items(batch_id,url,title,status) VALUES (?,?,?,?)",
+                (batch, "https://www.youtube.com/watch?v=" + letter * 11, letter, "queued"),
+            )
+        started, release = threading.Event(), threading.Event()
+        persist = media.persist_media
+
+        def blocked(folder: Path, write: object) -> None:
+            started.set()
+            release.wait(2)
+            persist(folder, write)
+
+        async def convert(_download: Path, folder: Path) -> None:
+            (folder / "video.mp4").write_bytes(b"video")
+            (folder / "audio.m4a").write_bytes(b"audio")
+
+        proxy = MagicMock()
+        proxy.__enter__.return_value = proxy
+        proxy.block_reason = None
+        with (
+            patch("app.media.public_addresses"),
+            patch("app.media.DownloadProxy", return_value=proxy),
+            patch.object(media, "persist_media", side_effect=blocked),
+            patch.object(
+                media,
+                "download",
+                new=AsyncMock(return_value={"file": "download.mp4", "title": "Video", "captions": []}),
+            ),
+            patch.object(media, "convert_source", side_effect=convert),
+            patch.object(media, "duration", new=AsyncMock(return_value=10)),
+            patch.object(media, "make_peaks", new=AsyncMock()),
+            patch.object(media, "make_thumbnail", new=AsyncMock()),
+        ):
+            await media.channels.launch(batch)
+            assert await asyncio.to_thread(started.wait, 2)
+            pause = asyncio.create_task(media.channels.pause(batch))
+            await asyncio.sleep(0)
+            release.set()
+            await pause
+        assert [row["status"] for row in db.rows("SELECT status FROM channel_items ORDER BY id")] == [
+            "complete",
+            "queued",
+        ]
+        assert db.one("SELECT status FROM channel_batches WHERE id=?", (batch,))["status"] == "paused"
+        assert len(db.sources()) == 1
+        source = db.sources()[0]
+        assert (media.root / source["media_id"] / "video.mp4").read_bytes() == b"video"
+        assert not media.busy
+        db.close()
+
+    asyncio.run(verify())

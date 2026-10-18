@@ -4,7 +4,7 @@ import asyncio
 import threading
 import time
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -303,3 +303,52 @@ def test_import_reservation_rejects_competing_starts_and_releases_failed_start(t
 
     asyncio.run(check())
     db.close()
+
+
+@pytest.mark.parametrize("stage", ["settings", "folder"])
+def test_import_preparation_failure_releases_reservation_and_fails_job(tmp_path: Path, stage: str) -> None:
+    async def verify() -> None:
+        db = Database(tmp_path / "prepare.sqlite3")
+        media = Media(Settings(_env_file=None, data_dir=tmp_path), db, Events())
+        job = db.add_job("https://example.com/video")
+        media.busy = True
+        target, attribute = (db, "setting") if stage == "settings" else (media, "prepare_import")
+        with patch.object(target, attribute, side_effect=OSError("Storage is unavailable")):
+            await media.import_job(job, "https://example.com/video")
+        assert not media.busy
+        assert media.operation.get() is None
+        assert db.one("SELECT status FROM jobs WHERE id=?", (job,))["status"] == "failed"
+        assert list(media.root.iterdir()) == []
+        db.close()
+
+    asyncio.run(verify())
+
+
+def test_cancelled_import_preparation_removes_staging_and_releases_reservation(tmp_path: Path) -> None:
+    async def verify() -> None:
+        db = Database(tmp_path / "prepare-cancel.sqlite3")
+        media = Media(Settings(_env_file=None, data_dir=tmp_path), db, Events())
+        job = db.add_job("https://example.com/video")
+        media.busy = True
+        started, release = threading.Event(), threading.Event()
+        prepare = media.prepare_import
+
+        def blocked(job_id: str, source_id: str | None) -> tuple:
+            result = prepare(job_id, source_id)
+            started.set()
+            release.wait(2)
+            return result
+
+        with patch.object(media, "prepare_import", side_effect=blocked):
+            task = asyncio.create_task(media.import_job(job, "https://example.com/video"))
+            assert await asyncio.to_thread(started.wait, 2)
+            task.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert not media.busy
+        assert db.one("SELECT status FROM jobs WHERE id=?", (job,))["status"] == "interrupted"
+        assert list(media.root.iterdir()) == []
+        db.close()
+
+    asyncio.run(verify())

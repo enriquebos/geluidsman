@@ -110,6 +110,7 @@ class Conversation:
         return {
             "enabled": self.enabled,
             "language": self.language,
+            "provider": self.provider,
             "recording": self.session is not None,
             "session": self.session,
             "backlog": self.work.qsize(),
@@ -123,7 +124,7 @@ class Conversation:
         }
 
     def receive(self, speaker: tuple, pcm: bytes, timestamp: float, session_id: str | None = None) -> None:
-        if not self.enabled or not self.session:
+        if not self.enabled or not self.session or getattr(self.bot.state, "audio_mode", "soundboard") == "music":
             return
         session_id = session_id or self.session["id"]
         try:
@@ -275,6 +276,11 @@ class Conversation:
             return ready
 
     async def synchronize(self) -> None:
+        if getattr(self.bot.state, "audio_mode", "soundboard") == "music":
+            if self.session:
+                await self.close_session()
+            self.error = None
+            return
         voice = self.bot.voice
         connected = bool(voice and voice.is_connected() and self.bot.client.is_ready())
         if self.session and (
@@ -301,7 +307,8 @@ class Conversation:
 
     async def open_session(self, voice: VoiceRecvClient) -> None:
         if (
-            self.switching_provider
+            getattr(self.bot.state, "audio_mode", "soundboard") == "music"
+            or self.switching_provider
             or self.closing_session
             or time.monotonic() < self.receiver_retry
             or self.model_status.get("target")
@@ -321,7 +328,13 @@ class Conversation:
             "INSERT INTO conversations(id,channel_id,channel_name,started_at) VALUES (?,?,?,?)",
             (session["id"], session["channel_id"], session["channel_name"], session["started_at"]),
         )
-        if not self.enabled or self.switching_provider or self.closing_session or self.provider != provider:
+        if (
+            not self.enabled
+            or self.switching_provider
+            or self.closing_session
+            or self.provider != provider
+            or getattr(self.bot.state, "audio_mode", "soundboard") == "music"
+        ):
             await self.db.run(self.db.execute, "DELETE FROM conversations WHERE id=?", (session["id"],))
             return
         if voice is not self.bot.voice or not voice.is_connected() or self.bot.state.deafened:
@@ -387,7 +400,11 @@ class Conversation:
         tick = 0
         while True:
             try:
-                if tick % 100 == 0 and self.bot.client.is_ready():
+                if (
+                    tick % 100 == 0
+                    and self.bot.client.is_ready()
+                    and getattr(self.bot.state, "audio_mode", "soundboard") != "music"
+                ):
                     await self.synchronize_model()
                 if tick % 50 == 0:
                     self.report_drops()
@@ -430,6 +447,7 @@ class Conversation:
     def current(self, session_id: str, speech: Speech, delay: float = 0) -> bool:
         return bool(
             self.enabled
+            and getattr(self.bot.state, "audio_mode", "soundboard") != "music"
             and self.session
             and self.session["id"] == session_id
             and self.bot.voice is self.voice

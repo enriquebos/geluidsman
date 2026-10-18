@@ -212,4 +212,6 @@ class ChannelImports:
             if status == "complete":
                 known.add(video_id(item["url"]))
             media.events.publish("jobs")
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError
         await self.update(batch_id, "complete")

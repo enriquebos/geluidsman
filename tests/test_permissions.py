@@ -326,6 +326,7 @@ def test_playback_requires_voice_presence_or_explicit_permission(
     channel = SimpleNamespace(members=[SimpleNamespace(id=100)] if present else [])
     state = SimpleNamespace(
         voice=SimpleNamespace(channel=channel, is_connected=lambda: True),
+        audio_mode="soundboard",
         play=Mock(return_value="instance"),
         status=dict,
         kirby=KirbyGuard(),

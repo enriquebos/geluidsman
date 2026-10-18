@@ -49,7 +49,7 @@ test('inline transcript is hidden outside voice and recording controls align', a
     const heading = await page.getByRole('heading', { name: 'Recording live' }).boundingBox()
     const toggle = await page.getByRole('switch', { name: 'Recording enabled' }).boundingBox()
     expect(Math.abs(heading!.y + heading!.height / 2 - toggle!.y - toggle!.height / 2)).toBeLessThan(3)
-    const description = await page.getByText('Local transcription, with Dutch selected by default.', { exact: false }).boundingBox()
+    const description = await page.getByText('Speech is transcribed by the configured provider.', { exact: false }).boundingBox()
     expect(description!.y - heading!.y - heading!.height).toBeGreaterThanOrEqual(20)
   }
 })
@@ -140,4 +140,18 @@ test('interim speech updates in place and becomes one final message', async ({ p
   await expect(transcript).toContainText('Naar bed.')
   await expect(transcript).not.toContainText('Recognizing…')
   await expect(transcript.locator('article')).toHaveCount(1)
+})
+
+
+test('conversation description identifies the active transcription provider', async ({ page }) => {
+  let provider = 'local'
+  await page.route('**/api/conversations/status', route => route.fulfill({ json: { ...status, provider } }))
+  await page.route('**/api/conversations/floating/messages*', route => route.fulfill({ json: { session, has_older: false, items: [] } }))
+  await page.goto('/conversation')
+  await expect(page.getByText('The local transcription worker transcribes speech.', { exact: false })).toBeVisible()
+  await expect(page.getByText('Deepgram Nova-3 transcribes speech through its API.', { exact: false })).toHaveCount(0)
+  provider = 'deepgram'
+  await page.reload()
+  await expect(page.getByText('Deepgram Nova-3 transcribes speech through its API.', { exact: false })).toBeVisible()
+  await expect(page.getByText('The local transcription worker transcribes speech.', { exact: false })).toHaveCount(0)
 })

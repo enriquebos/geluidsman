@@ -79,6 +79,8 @@ def register_account_routes(app: FastAPI, settings: Settings) -> None:
             resource_id="application",
             name="Application settings",
         )
+        app.state.music_sources.settings = await app.state.db.run(lambda: app.state.media.settings)
+        app.state.music.settings = app.state.music_sources.settings
         app.state.events.publish("refresh")
         return body.model_dump()
 

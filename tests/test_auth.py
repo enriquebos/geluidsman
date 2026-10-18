@@ -5,7 +5,7 @@ import json
 import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -14,7 +14,7 @@ from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from app.auth import Auth, digest
+from app.auth import Auth, digest, internal_path
 from app.config import Settings
 from app.main import create_app
 
@@ -111,6 +111,44 @@ def test_oauth_state_replay_mismatch_expiry_and_safe_redirect(client: TestClient
     assert client.get("/api/auth/discord/callback", params={"state": state, "code": "test-code"}).status_code == 400
 
 
+@pytest.mark.parametrize("destination", ["//[invalid", "http://[invalid", "//[::1", "/\\evil.example"])
+def test_malformed_oauth_redirect_uses_soundboard(destination: str) -> None:
+    assert internal_path(destination) == "/soundboard"
+
+
+def test_pending_logins_are_bounded_and_expired_entries_release_capacity(client: TestClient) -> None:
+    with patch("app.auth.MAX_PENDING_LOGINS", 2):
+        begin(client)
+        begin(client)
+        response = client.get("/api/auth/discord/login", follow_redirects=False)
+        assert response.status_code == 503
+        assert "busy" in response.json()["detail"]
+        db = client.app.state.db
+        assert db.one("SELECT COUNT(*) AS total FROM oauth_states")["total"] == 2
+        db.execute("UPDATE oauth_states SET expires_at=0 WHERE id=(SELECT id FROM oauth_states LIMIT 1)")
+        begin(client)
+        assert db.one("SELECT COUNT(*) AS total FROM oauth_states")["total"] == 2
+
+
+def test_concurrent_login_requests_cannot_exceed_pending_capacity(client: TestClient) -> None:
+    async def scenario() -> None:
+        with patch("app.auth.MAX_PENDING_LOGINS", 2):
+            results = await asyncio.gather(
+                *(
+                    client.app.state.db.run(client.app.state.auth.save_state, str(index), "browser", "/music")
+                    for index in range(8)
+                ),
+                return_exceptions=True,
+            )
+        assert sum(result is None for result in results) == 2
+        failures = [result for result in results if result is not None]
+        assert len(failures) == 6
+        assert all(isinstance(result, HTTPException) and result.status_code == 503 for result in failures)
+        assert client.app.state.db.one("SELECT COUNT(*) AS total FROM oauth_states")["total"] == 2
+
+    asyncio.run(scenario())
+
+
 def test_denied_and_ineligible_login_does_not_create_account(client: TestClient) -> None:
     state = begin(client)
     response = client.get(
@@ -124,6 +162,17 @@ def test_denied_and_ineligible_login_does_not_create_account(client: TestClient)
     )
     assert response.headers["location"] == "/login?error=ineligible"
     assert client.app.state.db.rows("SELECT * FROM users") == []
+
+
+def test_non_ascii_csrf_token_is_rejected_without_a_server_error(client: TestClient) -> None:
+    user = login(client)
+    response = client.put(
+        "/api/settings/personal",
+        json={"preview_volume": 0.4},
+        headers={b"Origin": ORIGIN.encode(), b"X-CSRF-Token": b"\xe9"},
+    )
+    assert response.status_code == 403
+    assert client.get("/api/auth/me").json()["id"] == user["id"]
 
 
 def test_private_endpoints_and_csrf(client: TestClient) -> None:

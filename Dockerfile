@@ -33,6 +33,7 @@ FROM app AS test
 USER root
 RUN --mount=type=cache,target=/root/.cache/pip pip install pytest==9.1.1 httpx==0.28.1 ruff==0.16.10
 COPY tests/ ./tests/
+RUN chmod -R a+rX /app/tests
 USER app
 CMD ["pytest", "-o", "cache_dir=/tmp/pytest-cache"]
 

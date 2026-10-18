@@ -204,73 +204,81 @@ class Media:
         folder.mkdir()
         return (job["actor_id"] if job else None), folder, source_id or folder.name
 
-    async def import_job(self, job_id: str, url: str, source_id: str | None = None) -> None:
-        operation_token = self.operation.set(await self.db.run(lambda: self.settings))
-        actor_id, folder, source_id = await self.db.run(self.prepare_import, job_id, source_id)
-        committed = False
+    async def prepare_job(self, job_id: str, source_id: str | None) -> tuple[str | None, Path, str]:
+        preparation = asyncio.create_task(self.db.run(self.prepare_import, job_id, source_id))
         try:
-            async with self.lock:
-                parsed = validate_url(url)
-                await asyncio.to_thread(
-                    public_addresses, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
-                )
-                await self.notify_job(job_id, "downloading")
-                available = self.settings.max_storage_bytes - self.used_bytes()
-                limit = min(self.settings.max_import_bytes, max(1, available))
-                with DownloadProxy(limit, self.settings.import_timeout_seconds) as proxy:
-                    info = await self.download(url, folder, proxy)
-                    if proxy.block_reason:
-                        raise MediaError(proxy.block_reason)
-                await self.notify_job(job_id, "processing", 0.92)
-                download = folder / info["file"]
-                await self.convert_source(download, folder)
-                duration = await self.duration(folder / "video.mp4")
-                if not 0 < duration <= self.settings.max_source_seconds:
-                    msg = "Source exceeds the configured duration limit."
-                    raise MediaError(msg)
-                await self.make_peaks(folder / "audio.m4a", folder / "peaks.json", duration)
-                await self.make_thumbnail(folder / "video.mp4", folder / "thumbnail.jpg")
-                for file in folder.glob("download*"):
-                    file.unlink(missing_ok=True)
-                if (
-                    await asyncio.to_thread(self.storage.projected, folder) > self.settings.max_storage_bytes
-                    or await asyncio.to_thread(size, folder) > self.settings.max_import_bytes
-                ):
-                    msg = "Converted media exceeds the configured storage limit."
-                    raise MediaError(msg)
-                tracks = await self.caption_tracks(info, folder, duration)
-                previous = await self.db.run(self.db.one, "SELECT media_id FROM sources WHERE id=?", (source_id,))
-                await self.commit_media(
-                    folder,
-                    partial(
-                        self.db.save_source,
-                        {
-                            "id": source_id,
-                            "url": url,
-                            "title": info["title"],
-                            "duration": duration,
-                            "media_id": folder.name,
-                        },
-                        tracks,
-                        actor_id,
-                    ),
-                )
-                committed = True
-                if previous:
-                    await asyncio.to_thread(self.storage.remove, self.root / (previous["media_id"] or source_id))
-                await self.notify_job(job_id, "complete", 1, source_id=source_id)
-                self.events.publish("library")
+            return await asyncio.shield(preparation)
+        except asyncio.CancelledError:
+            _, folder, _ = await preparation
+            await asyncio.to_thread(self.storage.remove, folder)
+            raise
+
+    async def import_job(self, job_id: str, url: str, source_id: str | None = None) -> None:
+        folder, committed = None, False
+        try:
+            async with self.configured_operation():
+                actor_id, folder, source_id = await self.prepare_job(job_id, source_id)
+                async with self.lock:
+                    parsed = validate_url(url)
+                    await asyncio.to_thread(
+                        public_addresses, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+                    )
+                    await self.notify_job(job_id, "downloading")
+                    available = self.settings.max_storage_bytes - self.used_bytes()
+                    limit = min(self.settings.max_import_bytes, max(1, available))
+                    with DownloadProxy(limit, self.settings.import_timeout_seconds) as proxy:
+                        info = await self.download(url, folder, proxy)
+                        if proxy.block_reason:
+                            raise MediaError(proxy.block_reason)
+                    await self.notify_job(job_id, "processing", 0.92)
+                    download = folder / info["file"]
+                    await self.convert_source(download, folder)
+                    duration = await self.duration(folder / "video.mp4")
+                    if not 0 < duration <= self.settings.max_source_seconds:
+                        msg = "Source exceeds the configured duration limit."
+                        raise MediaError(msg)
+                    await self.make_peaks(folder / "audio.m4a", folder / "peaks.json", duration)
+                    await self.make_thumbnail(folder / "video.mp4", folder / "thumbnail.jpg")
+                    for file in folder.glob("download*"):
+                        file.unlink(missing_ok=True)
+                    if (
+                        await asyncio.to_thread(self.storage.projected, folder) > self.settings.max_storage_bytes
+                        or await asyncio.to_thread(size, folder) > self.settings.max_import_bytes
+                    ):
+                        msg = "Converted media exceeds the configured storage limit."
+                        raise MediaError(msg)
+                    tracks = await self.caption_tracks(info, folder, duration)
+                    previous = await self.db.run(self.db.one, "SELECT media_id FROM sources WHERE id=?", (source_id,))
+                    await self.commit_media(
+                        folder,
+                        partial(
+                            self.db.save_source,
+                            {
+                                "id": source_id,
+                                "url": url,
+                                "title": info["title"],
+                                "duration": duration,
+                                "media_id": folder.name,
+                            },
+                            tracks,
+                            actor_id,
+                        ),
+                    )
+                    committed = True
+                    if previous:
+                        await asyncio.to_thread(self.storage.remove, self.root / (previous["media_id"] or source_id))
+                    await self.notify_job(job_id, "complete", 1, source_id=source_id)
+                    self.events.publish("library")
         except asyncio.CancelledError:
             await self.notify_job(job_id, "interrupted", error="Import interrupted. Retry to start again.")
-            if not committed:
+            if folder is not None and not committed:
                 await asyncio.to_thread(self.storage.remove, folder)
             raise
         except (ValueError, OSError, TimeoutError, *DATABASE_ERRORS) as exc:
             await self.report_import_error(job_id, exc)
-            if not committed:
+            if folder is not None and not committed:
                 await asyncio.to_thread(self.storage.remove, folder)
         finally:
-            self.operation.reset(operation_token)
             self.busy = False
 
     async def report_import_error(self, job_id: str, exc: Exception) -> None:

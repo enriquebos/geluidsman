@@ -4,11 +4,12 @@ import json
 import logging
 import re
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
 import psycopg
 from psycopg.rows import dict_row
+
+from app.database_schema import initialize_schema
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -96,7 +97,8 @@ class Connection:
         self.raw.execute(query)
 
     def initialize(self) -> None:
-        self.executescript(Path(__file__).with_name("schema.sql").read_text(encoding="utf-8"))
+        with self:
+            initialize_schema(self, postgres=True)
         self.raw.execute("SET pg_trgm.word_similarity_threshold=0.3")
 
     def close(self) -> None:

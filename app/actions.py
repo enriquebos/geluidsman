@@ -109,7 +109,14 @@ class Actions:
 
     def synchronize(self) -> None:
         voice = self.bot.voice
-        signature = (voice, voice.channel.id) if voice and voice.is_connected() and self.bot.client.is_ready() else None
+        signature = (
+            (voice, voice.channel.id)
+            if voice
+            and voice.is_connected()
+            and self.bot.client.is_ready()
+            and getattr(self.bot.state, "audio_mode", "soundboard") != "music"
+            else None
+        )
         if signature == self.signature:
             return
         self.invalidate()
@@ -199,6 +206,10 @@ class Actions:
             self.enqueue_event(member, "speaking_start" if active else "speaking_stop")
 
     async def synchronize_speech(self) -> None:
+        if getattr(self.bot.state, "audio_mode", "soundboard") == "music":
+            self.release_speech()
+            self.speech_wanted = False
+            return
         if time.monotonic() < self.speech_check:
             return
         self.speech_check = time.monotonic() + 1
@@ -225,7 +236,8 @@ class Actions:
     def current(self, event: VoiceEvent) -> bool:
         voice = self.bot.voice
         if (
-            event.generation != self.generation
+            getattr(self.bot.state, "audio_mode", "soundboard") == "music"
+            or event.generation != self.generation
             or not voice
             or not voice.is_connected()
             or not self.bot.client.is_ready()

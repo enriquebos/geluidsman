@@ -153,8 +153,10 @@ def test_import_error_dismissal_preserves_library_and_running_jobs(client: TestC
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="Requires FFmpeg")
-def test_real_clip_extraction(client: TestClient) -> None:
+@pytest.mark.parametrize("mode", ["soundboard", "music"])
+def test_real_clip_extraction(client: TestClient, mode: str) -> None:
 
+    client.app.state.bot.state.audio_mode = mode
     folder = client.app.state.media.root / "source"
     folder.mkdir()
     subprocess.run(
@@ -185,6 +187,10 @@ def test_real_clip_extraction(client: TestClient) -> None:
     assert response.status_code == 206
     assert len(response.content) == 100
     assert client.get("/api/state").json()["clips"][0]["name"] == "Real tone"
+    edited = client.patch(f"/api/clips/{clip_id}", json={"name": "Edited tone", "volume": 0.5})
+    assert edited.status_code == 200
+    assert client.get("/api/state").json()["clips"][0]["name"] == "Edited tone"
+    assert client.app.state.bot.state.audio_mode == mode
 
 
 def test_guild_channel_validation(client: TestClient) -> None:

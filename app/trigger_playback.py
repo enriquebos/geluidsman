@@ -75,8 +75,13 @@ class TriggerPlayback:
     async def authorization(self, trigger: dict, context: PlaybackContext) -> str | None:
         permission = "stop_sounds" if trigger.get("action") == "stop_all" else "play_sounds"
         required = (permission, context.access) if context.access else (permission,)
-        if not await self.db.run(self.permitted, trigger["owner_id"], required):
-            return "Creator no longer has permission for this trigger action."
+        music = getattr(self.bot.state, "audio_mode", "soundboard") == "music"
+        if music or not await self.db.run(self.permitted, trigger["owner_id"], required):
+            return (
+                "Automatic actions are suspended in Music mode."
+                if music
+                else "Creator no longer has permission for this trigger action."
+            )
         guild = self.bot.client.get_guild(self.settings.discord_guild_id)
         member = await self.guild_member(guild, trigger["owner_id"])
         participant = (
@@ -118,6 +123,8 @@ class TriggerPlayback:
         reason, instance = None, None
         try:
             clip, reason = await self.prepare(trigger, context)
+            if not reason and getattr(self.bot.state, "audio_mode", "soundboard") == "music":
+                reason = "Automatic actions are suspended in Music mode."
             if not reason:
                 if stopping:
                     if self.bot.state.mixer:

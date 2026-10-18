@@ -9,6 +9,9 @@ if TYPE_CHECKING:
 
 
 CATALOGUE = [
+    ("view_music", "Access music and playlists", "Music"),
+    ("control_music", "Control music and the shared queue", "Music"),
+    ("switch_audio_mode", "Switch Soundboard and Music mode", "Music"),
     ("admin", "Access admin panel", "Administration"),
     ("long_sounds", "Create and upload sounds up to 10 minutes", "Sounds"),
     ("high_volume", "Boost sound volume to 1000%", "Sounds"),

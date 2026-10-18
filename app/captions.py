@@ -29,7 +29,13 @@ def json_cues(data: dict) -> list[dict]:
         raise TypeError(message)
     cues = []
     for event in data.get("events", []):
+        if not isinstance(event, dict):
+            message = "Invalid caption event."
+            raise TypeError(message)
         segments = event.get("segs", [])
+        if not isinstance(segments, list) or not all(isinstance(segment, dict) for segment in segments):
+            message = "Invalid caption segments."
+            raise TypeError(message)
         start = event.get("tStartMs", 0) / MILLISECONDS
         end = start + event.get("dDurationMs", 0) / MILLISECONDS
         text = clean("".join(segment.get("utf8", "") for segment in segments))

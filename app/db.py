@@ -6,20 +6,22 @@ import sqlite3
 import threading
 import time
 import uuid
+from contextlib import suppress
 from functools import partial
-from pathlib import Path
 from typing import TYPE_CHECKING, ParamSpec, TypeVar
 
 import anyio
 import psycopg
 
 from app.caption_matching import caption_match, search_tokens
+from app.database_schema import initialize_schema
 from app.fun import SOUND_EFFECTS
 from app.import_errors import import_guidance
 from app.postgres import Connection
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from app.types import JsonObject, JsonValue, SQLParameters
 
@@ -38,31 +40,24 @@ def new_id() -> str:
 class Database:
     def __init__(self, path: Path, url: str = "") -> None:
         self.worker_limit = anyio.CapacityLimiter(4)
-        if url:
-            self.lock = threading.RLock()
-            self.conn = Connection(url)
-            self.conn.initialize()
-            with self.lock, self.conn:
-                self.recover_jobs()
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
-        self.conn = sqlite3.connect(path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        with self.conn:
-            message_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(conversation_messages)")}
-            if message_columns and "received_order" not in message_columns:
-                self.conn.execute("ALTER TABLE conversation_messages ADD COLUMN received_order INTEGER")
-                self.conn.execute("UPDATE conversation_messages SET received_order=rowid")
-            self.conn.executescript(Path(__file__).with_name("schema_sqlite.sql").read_text(encoding="utf-8"))
-            columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(conversation_triggers)")}
-            for name, definition in (
-                ("action", "TEXT NOT NULL DEFAULT 'play'"),
-                ("delay", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
-            ):
-                if name not in columns:
-                    self.conn.execute(f"ALTER TABLE conversation_triggers ADD COLUMN {name} {definition}")
-            self.recover_jobs()
+        if url:
+            self.conn = Connection(url)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(path, check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
+        try:
+            if url:
+                self.conn.initialize()
+            with self.lock, self.conn:
+                if not url:
+                    initialize_schema(self.conn, postgres=False)
+                self.recover_jobs()
+        except BaseException:
+            with suppress(Exception):
+                self.conn.close()
+            raise
 
     async def run(
         self, function: Callable[WorkArgs, WorkResult], *args: WorkArgs.args, **kwargs: WorkArgs.kwargs

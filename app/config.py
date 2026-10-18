@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     max_source_seconds: int = Field(3600, ge=1)
     max_import_bytes: int = Field(1_000_000_000, ge=1)
     max_storage_bytes: int = Field(10_000_000_000, ge=1)
+    music_cache_max_bytes: int = Field(10_000_000_000, ge=1)
     max_channel_videos: int = Field(2000, ge=1, le=10000)
     max_clip_seconds: float = Field(60, ge=0.1, le=300)
     max_playbacks: int = Field(8, ge=1, le=32)
@@ -33,6 +34,9 @@ class Settings(BaseSettings):
     js_runtime: str = "deno"
     transcription_provider: Literal["local", "deepgram"] = "local"
     deepgram_api_key: SecretStr = SecretStr("")
+    spotify_client_id: SecretStr = SecretStr("")
+    spotify_client_secret: SecretStr = SecretStr("")
+    spotify_market: str = Field(default="NL", pattern=r"^[A-Z]{2}$")
     transcription_url: str = "http://transcription:8000"
     transcription_api_token: SecretStr = SecretStr("")
 

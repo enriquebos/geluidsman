@@ -28,6 +28,12 @@ from app.fun import SOUND_EFFECTS
 from app.logs import ConsoleLogs
 from app.media import Media, MediaError
 from app.mixer import CapacityError
+from app.music_cache import MusicCache
+from app.music_imports import MusicImports
+from app.music_player import MusicPlayer
+from app.music_routes import register_music_routes
+from app.music_sources import MusicSources
+from app.music_store import MusicStore
 from app.permissions import can_play_in_channel, require_permission, require_sound_permission
 
 if TYPE_CHECKING:
@@ -128,6 +134,37 @@ async def initialize_automation(app: FastAPI, settings: Settings) -> None:
     await app.state.conversation.start()
 
 
+async def initialize_music(app: FastAPI, settings: Settings) -> None:
+    settings = await app.state.db.run(lambda: app.state.media.settings)
+    app.state.music_store = MusicStore(app.state.db)
+    app.state.music_sources = MusicSources(settings)
+    app.state.music_cache = MusicCache(app.state.db, app.state.music_sources, app.state.music_store, app.state.events)
+    app.state.music_sources.cache = app.state.music_cache
+    app.state.music = MusicPlayer(
+        settings,
+        app.state.db,
+        app.state.events,
+        app.state.bot.state,
+        sources=app.state.music_sources,
+        store=app.state.music_store,
+    )
+    app.state.bot.state.music = app.state.music
+    app.state.music_imports = MusicImports(app)
+    await app.state.music.start()
+    await app.state.music_cache.start()
+
+
+async def shutdown_bot_services(app: FastAPI) -> None:
+    await app.state.bot.close()
+    await app.state.music_imports.close()
+    await app.state.music.close()
+    await app.state.music_cache.close()
+    await app.state.music_sources.close()
+    await app.state.actions.close()
+    await app.state.conversation.close()
+    await app.state.auth.close()
+
+
 def create_app(settings: Settings | None = None, *, resume_channel_id: str | None = None) -> FastAPI:
     settings = settings or get_settings()
 
@@ -147,6 +184,7 @@ def create_app(settings: Settings | None = None, *, resume_channel_id: str | Non
         app.state.auth = Auth(settings, db, bot)
         app.state.clip_tasks = set()
         logging.getLogger("app").info("Website starting; admin console available")
+        await initialize_music(app, settings)
         await initialize_automation(app, settings)
         await bot.start()
         try:
@@ -156,10 +194,7 @@ def create_app(settings: Settings | None = None, *, resume_channel_id: str | Non
                     await media.channels.resume(resume_channel_id)
             yield
         finally:
-            await bot.close()
-            await app.state.actions.close()
-            await app.state.conversation.close()
-            await app.state.auth.close()
+            await shutdown_bot_services(app)
             await media.close()
             for task in tuple(app.state.clip_tasks):
                 task.cancel()
@@ -179,6 +214,7 @@ def create_app(settings: Settings | None = None, *, resume_channel_id: str | Non
     register_admin_routes(app)
     register_conversation_routes(app)
     register_action_routes(app)
+    register_music_routes(app)
     register_state_routes(app, settings)
 
     register_library_routes(app, settings)
@@ -561,6 +597,8 @@ async def voice_target(app: FastAPI, request: Request, guild_id: str, channel_id
 
 
 def guard_manual_playback(state: GuildVoice, user_id: str, events: Events) -> None:
+    if state.audio_mode == "music":
+        raise HTTPException(409, "Soundboard playback is disabled in Music mode.")
     if state.voice and state.voice.is_connected():
         try:
             remaining, activated = state.kirby.attempt(user_id, state.fun_settings)
@@ -666,6 +704,8 @@ def register_stop_routes(app: FastAPI) -> None:
     @app.post("/api/guilds/{guild_id}/playbacks/stop", dependencies=[Depends(require_permission("stop_sounds"))])
     async def stop_all(guild_id: str, request: Request) -> dict[str, object]:
         state = await voice_target(app, request, guild_id)
+        if state.audio_mode == "music":
+            raise HTTPException(409, "Soundboard playback is disabled in Music mode.")
         if state.mixer:
             state.mixer.stop()
         await app.state.db.run(app.state.db.audit, request.state.user["id"], "sound.stop_all", guild_id=guild_id)
@@ -676,6 +716,8 @@ def register_stop_routes(app: FastAPI) -> None:
     )
     async def stop(guild_id: str, instance_id: str, request: Request) -> dict[str, object]:
         state = await voice_target(app, request, guild_id)
+        if state.audio_mode == "music":
+            raise HTTPException(409, "Soundboard playback is disabled in Music mode.")
         playback = (
             next((item for item in state.mixer.snapshot() if item["id"] == instance_id), None) if state.mixer else None
         )
@@ -732,6 +774,7 @@ def register_media_routes(app: FastAPI, _settings: Settings) -> None:
     @app.get("/admin", response_model=None)
     @app.get("/", response_model=None)
     @app.get("/soundboard", response_model=None)
+    @app.get("/music", response_model=None)
     @app.get("/videos", response_model=None)
     @app.get("/videos/{source_id}/cut", response_model=None)
     async def index() -> FileResponse | JSONResponse:

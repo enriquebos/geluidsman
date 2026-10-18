@@ -50,6 +50,10 @@ class GuildVoice:
         self.disconnected_since = None
         self.receiver = None
         self.actions = None
+        self.music = None
+        self.audio_mode = db.setting(f"guild:{guild_id}:audio_mode", "soundboard")
+        self.soundboard_deafened = db.setting(f"guild:{guild_id}:soundboard_deafened", self.deafened)
+        self.deafened = self.audio_mode == "music" or self.deafened
         self.master_volume = db.setting(f"guild:{guild_id}:master_volume", 0.8)
         self.selected_channel_id = db.setting(f"guild:{guild_id}:selected_channel_id")
 
@@ -61,7 +65,13 @@ class GuildVoice:
     def notify_playback(self) -> None:
         def changed() -> None:
             voice = self.voice
-            if voice and self.mixer and not self.mixer.snapshot() and voice.is_playing():
+            if (
+                self.audio_mode == "soundboard"
+                and voice
+                and self.mixer
+                and not self.mixer.snapshot()
+                and voice.is_playing()
+            ):
                 voice.pause()
             self.events.publish("playback")
 
@@ -95,6 +105,7 @@ class GuildVoice:
             else "disconnected"
         )
         return {
+            "audio_mode": self.audio_mode,
             "connection_state": connection_state,
             "snapshot_at": time.time(),
             "bot_ready": self.client.is_ready(),
@@ -146,7 +157,7 @@ class GuildVoice:
                     cls=VoiceRecvClient,
                     timeout=VOICE_HANDSHAKE_TIMEOUT,
                     reconnect=True,
-                    self_deaf=self.deafened,
+                    self_deaf=self.audio_mode == "music" or self.deafened,
                     self_mute=self.muted,
                 )
             )
@@ -217,6 +228,8 @@ class GuildVoice:
                 self.retry_delay = 5.0
 
     async def disconnect_unlocked(self) -> None:
+        if self.music:
+            await self.music.pause()
         if self.actions:
             self.actions.invalidate()
         if self.receiver:
@@ -251,6 +264,9 @@ class GuildVoice:
                 )
 
     def play(self, path: Path, clip: JsonObject) -> str:
+        if self.audio_mode == "music":
+            message = "Soundboard playback is disabled in Music mode."
+            raise VoiceError(message)
         if not self.client.is_ready() or not self.voice or not self.voice.is_connected() or not self.mixer:
             msg = "Connect the bot to a voice channel before playing a sound."
             raise VoiceError(msg)
@@ -279,13 +295,18 @@ class GuildVoice:
         return instance_id
 
     def update_flags(self, *, muted: bool, deafened: bool) -> None:
-        self.muted, self.deafened = muted, deafened
+        self.muted, self.deafened = muted, self.audio_mode == "music" or deafened
         if self.mixer:
             with self.mixer.lock:
                 self.mixer.muted = muted
+        if self.music:
+            self.music.update_volume()
 
     async def flags(self, *, muted: bool, deafened: bool) -> None:
         async with self.lock:
+            if self.audio_mode == "music" and not deafened:
+                msg = "Music mode keeps the bot deafened. Switch to Soundboard mode to undeafen it."
+                raise VoiceError(msg)
             voice = self.voice
             if not voice or not voice.is_connected():
                 msg = "Connect the bot before changing mute or deafen."
@@ -307,8 +328,132 @@ class GuildVoice:
         if self.mixer:
             with self.mixer.lock:
                 self.mixer.volume = value
+        if self.music:
+            self.music.update_volume()
         await self.db.run(self.db.set_setting, f"guild:{self.settings.discord_guild_id}:master_volume", value)
         self.events.publish("status")
+
+    async def enforce_music_deafen(self, state: discord.VoiceState) -> None:
+        if self.audio_mode == "music" and state.channel and not state.self_deaf:
+            guild = self.client.get_guild(self.settings.discord_guild_id)
+            try:
+                await guild.change_voice_state(channel=state.channel, self_mute=state.self_mute, self_deaf=True)
+            except discord.DiscordException:
+                logging.getLogger("app.bot").warning("Discord could not enforce Music mode deafen")
+
+    async def mode_deafen(self, mode: str, previous: str, *, previous_deafened: bool) -> None:
+        target_deafened = mode == "music" or self.soundboard_deafened
+        if previous == "soundboard":
+            self.soundboard_deafened = previous_deafened
+            target_deafened = True
+            await self.db.run(
+                self.db.set_setting,
+                f"guild:{self.settings.discord_guild_id}:soundboard_deafened",
+                previous_deafened,
+            )
+        if self.voice and self.voice.is_connected():
+            guild = self.client.get_guild(self.settings.discord_guild_id)
+            try:
+                await guild.change_voice_state(
+                    channel=self.voice.channel, self_mute=self.muted, self_deaf=target_deafened
+                )
+            except discord.DiscordException as error:
+                message = "Discord could not update the mode's deafen setting. Try again shortly."
+                raise VoiceError(message) from error
+        self.update_flags(muted=self.muted, deafened=target_deafened)
+
+    def restore_mode(self, previous: str, *, deafened: bool) -> None:
+        self.audio_mode = previous
+        if previous == "soundboard" and self.voice and self.voice.is_connected() and self.mixer is None:
+            self.mixer = Mixer(self.settings.max_playbacks, self.master_volume, self.notify_playback)
+        self.update_flags(muted=self.muted, deafened=deafened)
+
+    async def restore_mode_settings(
+        self, previous: str, *, deafened: bool, deafen_updated: bool, mode_write_started: bool
+    ) -> None:
+        repairs = []
+        if deafen_updated and self.voice and self.voice.is_connected():
+            guild = self.client.get_guild(self.settings.discord_guild_id)
+            if guild:
+                repairs.append(
+                    guild.change_voice_state(channel=self.voice.channel, self_mute=self.muted, self_deaf=deafened)
+                )
+        if mode_write_started:
+            repairs.append(
+                self.db.run(self.db.set_setting, f"guild:{self.settings.discord_guild_id}:audio_mode", previous)
+            )
+        for result in await asyncio.gather(*repairs, return_exceptions=True):
+            if isinstance(result, BaseException):
+                logging.getLogger("app.bot").warning(
+                    "Could not fully restore the previous audio mode after a failed switch (%s)", type(result).__name__
+                )
+
+    async def rollback_mode(
+        self, previous: str, *, deafened: bool, deafen_updated: bool, mode_write_started: bool
+    ) -> None:
+        self.restore_mode(previous, deafened=deafened)
+        repair = asyncio.create_task(
+            self.restore_mode_settings(
+                previous,
+                deafened=deafened,
+                deafen_updated=deafen_updated,
+                mode_write_started=mode_write_started,
+            )
+        )
+        while not repair.done():
+            try:
+                await asyncio.shield(repair)
+            except asyncio.CancelledError:
+                continue
+        repair.result()
+
+    async def select_mode(self, mode: str, user_id: str | None = None) -> None:
+        async with self.lock:
+            if user_id is not None and (
+                not self.voice
+                or not self.voice.is_connected()
+                or not any(str(member.id) == user_id and not member.bot for member in self.voice.channel.members)
+            ):
+                message = "Join the bot's voice channel to switch modes."
+                raise VoiceError(message)
+            if mode == self.audio_mode:
+                return
+            previous = self.audio_mode
+            previous_deafened = self.deafened
+            self.audio_mode = mode
+            deafen_updated = False
+            mode_write_started = False
+            try:
+                if self.music:
+                    await self.music.pause()
+                if self.actions:
+                    self.actions.invalidate()
+                if self.receiver:
+                    await self.receiver.close_session()
+                if self.mixer:
+                    self.mixer.cleanup()
+                    self.mixer = None
+                if self.voice:
+                    self.voice.stop()
+                await self.mode_deafen(mode, previous, previous_deafened=previous_deafened)
+                deafen_updated = True
+                mode_write_started = True
+                await self.db.run(self.db.set_setting, f"guild:{self.settings.discord_guild_id}:audio_mode", mode)
+                if mode == "soundboard" and self.voice and self.voice.is_connected():
+                    self.mixer = Mixer(self.settings.max_playbacks, self.master_volume, self.notify_playback)
+                    self.mixer.muted = self.muted
+            except BaseException:
+                await self.rollback_mode(
+                    previous,
+                    deafened=previous_deafened,
+                    deafen_updated=deafen_updated,
+                    mode_write_started=mode_write_started,
+                )
+                raise
+            finally:
+                self.events.publish("audio-mode")
+                self.events.publish("status")
+                self.events.publish("music")
 
 
 class Bot:
@@ -383,6 +528,7 @@ class Bot:
         if self.client.user and member.id == self.client.user.id:
             state = self.state if member.guild.id == self.settings.discord_guild_id else None
             if state:
+                await state.enforce_music_deafen(after)
                 state.update_flags(muted=after.self_mute, deafened=after.self_deaf or after.deaf)
                 if state.receiver and (before.channel != after.channel or after.self_deaf or after.deaf):
                     await state.receiver.close_session()
@@ -562,6 +708,13 @@ class Bot:
     def play(self, path: Path, clip: JsonObject, guild_id: int | None = None) -> str:
         return self.guild_state(guild_id).play(path, clip)
 
+    async def voice_disconnected(self) -> None:
+        if self.state.music:
+            await self.state.music.pause()
+        if self.state.mixer:
+            self.state.mixer.stop()
+        self.events.publish("status")
+
     async def start(self) -> None:
         if not self.settings.discord_token.get_secret_value():
             return
@@ -587,9 +740,8 @@ class Bot:
             while True:
                 voice = self.state.voice
                 current = bool(voice and voice.is_connected())
-                if connected and not current and self.state.mixer:
-                    self.state.mixer.stop()
-                    self.events.publish("status")
+                if connected and not current:
+                    await self.voice_disconnected()
                 connected = current
                 await self.state.reconnect()
                 await asyncio.sleep(1)

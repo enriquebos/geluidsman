@@ -8,9 +8,9 @@ test('navigation groups, channel context and connection states are clear', async
   await page.route('**/api/state', route => route.fulfill({ json: { ...data, status: { ...data.status, connection_state: state, connected: state === 'connected', muted, deafened, channel_name: 'Voice room', participants: [{ id: '200', name: 'Guest', avatar: null }] } } }))
   await page.goto('/soundboard')
   const nav = page.getByRole('navigation', { name: 'Main navigation' })
-  await expect(nav.getByRole('group', { name: 'Play', exact: true }).getByRole('button')).toHaveCount(3)
-  await expect(nav.getByRole('group', { name: 'Create', exact: true }).getByRole('button', { name: /Video library/ })).toBeAttached()
-  await expect(nav.getByRole('group', { name: 'Manage', exact: true }).getByRole('button')).toHaveCount(4)
+  await expect(nav.getByRole('button')).toHaveCount(3)
+  await expect(nav.getByRole('group')).toHaveCount(0)
+  await expect(page.getByRole('navigation', { name: 'Soundboard navigation' }).getByRole('button', { name: /Video library/ })).toBeVisible()
   const header = page.getByRole('banner', { name: 'Discord connection' })
   await expect(header.locator('strong')).toHaveText('Disconnected')
   for (const pending of ['connecting', 'reconnecting']) {

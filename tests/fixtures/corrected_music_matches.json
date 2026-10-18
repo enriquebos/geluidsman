@@ -1,0 +1,143 @@
+[
+  {
+    "spotify": {
+      "title": "Round Ere",
+      "artist": "K Motionz",
+      "duration": 274.285
+    },
+    "youtube": {
+      "title": "K Motionz - Round Ere",
+      "artist": "#alldayjumpup #",
+      "duration": 274.0,
+      "youtube_id": "2ZVgOWAflII"
+    },
+    "expected_match": true
+  },
+  {
+    "spotify": {
+      "title": "Together",
+      "artist": "Mefjus",
+      "duration": 284.651,
+      "album": "Manifest"
+    },
+    "youtube": {
+      "title": "Mefjus - Together (Manifest)",
+      "artist": "Mefjus",
+      "duration": 285.0,
+      "youtube_id": "YT1NbiDsb0c"
+    },
+    "expected_match": true
+  },
+  {
+    "spotify": {
+      "title": "Program",
+      "artist": "Chase & Status, IRAH",
+      "duration": 252.36
+    },
+    "youtube": {
+      "title": "Chase & Status - Program ft. IRAH",
+      "artist": "Chase & Status",
+      "duration": 224.0,
+      "youtube_id": "4ec-MnePMpE"
+    },
+    "expected_match": false
+  },
+  {
+    "spotify": {
+      "title": "Run (Part 1)",
+      "artist": "Mozey, Sofia",
+      "duration": 135.085
+    },
+    "youtube": {
+      "title": "Mozey - Run (ft. Sofia)",
+      "artist": "UKF Drum & Bass",
+      "duration": 192.0,
+      "youtube_id": "1abjXBh7j4M"
+    },
+    "expected_match": false
+  },
+  {
+    "spotify": {
+      "title": "Back Trackin",
+      "artist": "K Motionz, Comma Dee",
+      "duration": 212.5
+    },
+    "youtube": {
+      "title": "K Motionz - Back Trackin (ft. Comma Dee)",
+      "artist": "UKF Drum & Bass",
+      "duration": 243.0,
+      "youtube_id": "gtycUh3T8WY"
+    },
+    "expected_match": false
+  },
+  {
+    "spotify": {
+      "title": "Let You Go",
+      "artist": "Rova",
+      "duration": 250.568
+    },
+    "youtube": {
+      "title": "Let You Go",
+      "artist": "Rova",
+      "duration": 251.0,
+      "youtube_id": "mqoeQPOSwL0"
+    },
+    "expected_match": true
+  },
+  {
+    "spotify": {
+      "title": "Close To Me (VIP)",
+      "artist": "Rova, Pollen Archive",
+      "duration": 263.314
+    },
+    "youtube": {
+      "title": "Rova - Close To Me (VIP) (Free Download)",
+      "artist": "RELEVANT DNB",
+      "duration": 264.0,
+      "youtube_id": "3VoTSSlQjX4"
+    },
+    "expected_match": true
+  },
+  {
+    "spotify": {
+      "title": "One",
+      "artist": "SOTA",
+      "duration": 271.542
+    },
+    "youtube": {
+      "title": "One",
+      "artist": "Sota",
+      "duration": 272.0,
+      "youtube_id": "CwMGQ_szMss"
+    },
+    "expected_match": true
+  },
+  {
+    "spotify": {
+      "title": "See The Sun",
+      "artist": "SOTA",
+      "duration": 172.413
+    },
+    "youtube": {
+      "title": "Sota - See The Sun | Interaction | Bassrush Records",
+      "artist": "Bassrush",
+      "duration": 172.0,
+      "youtube_id": "hM2cZ6wepfE"
+    },
+    "expected_match": true
+  },
+  {
+    "spotify": {
+      "title": "Disconnect - [IVY] & Sudley Remix",
+      "artist": "Becky Hill, [IVY], Sudley",
+      "duration": 186.691
+    },
+    "youtube": {
+      "title": "Becky Hill x Chase & Status - Disconnect ([IVY] & Sudley Remix)",
+      "artist": "Becky Hill Official",
+      "duration": 187.0,
+      "youtube_id": "J-MY3uPq5hg"
+    },
+    "expected_match": true
+  }
+]

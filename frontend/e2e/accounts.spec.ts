@@ -354,6 +354,7 @@ test('Hall of shame leaderboard and playback graph default to today and support 
   await expect(page.getByRole('list', { name: 'Activity entries' })).toHaveCount(0)
   await page.reload()
   await expect(page.getByRole('heading', { name: 'All-time sound leaderboard' })).toBeVisible()
+  await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('button', { name: 'Audit log', exact: true }).click()
   await expect(page.getByRole('table', { name: 'Sound leaderboard' })).toHaveCount(0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(page.viewportSize()!.width)

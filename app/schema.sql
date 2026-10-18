@@ -26,6 +26,13 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
+CREATE TABLE IF NOT EXISTS music_playlists (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, creator_id TEXT NOT NULL REFERENCES users(id),
+    collaborative INTEGER NOT NULL DEFAULT 0, tracks TEXT NOT NULL DEFAULT '[]', track_count INTEGER NOT NULL DEFAULT 0,
+    created_at DOUBLE PRECISION NOT NULL, updated_at DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS music_playlists_creator ON music_playlists(creator_id,updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS channel_batches (
                     id TEXT PRIMARY KEY,url TEXT NOT NULL,title TEXT NOT NULL,status TEXT NOT NULL,
                     error TEXT,created_at DOUBLE PRECISION NOT NULL
@@ -104,7 +111,7 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     speaker_id TEXT NOT NULL, speaker_name TEXT NOT NULL, avatar TEXT,
     started_at DOUBLE PRECISION NOT NULL, ended_at DOUBLE PRECISION NOT NULL,
-    text TEXT NOT NULL, language TEXT NOT NULL
+    text TEXT NOT NULL, language TEXT NOT NULL, received_order BIGSERIAL
 );
 CREATE TABLE IF NOT EXISTS conversation_triggers (
     id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), clip_id TEXT NOT NULL,
@@ -117,12 +124,8 @@ CREATE INDEX IF NOT EXISTS conversations_time ON conversations(started_at DESC,i
 CREATE INDEX IF NOT EXISTS conversation_messages_time ON conversation_messages(session_id,started_at,id);
 CREATE INDEX IF NOT EXISTS conversation_triggers_owner ON conversation_triggers(owner_id);
 
-ALTER TABLE clips ALTER COLUMN source_id DROP NOT NULL;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX IF NOT EXISTS caption_search_trigrams ON caption_search USING GIN (lower(text) gin_trgm_ops);
-
-ALTER TABLE conversation_triggers ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'play';
-ALTER TABLE conversation_triggers ADD COLUMN IF NOT EXISTS delay DOUBLE PRECISION NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS action_triggers (
     id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), event TEXT NOT NULL,
@@ -138,26 +141,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS conversation_sound_unique ON conversation_trig
 CREATE TABLE IF NOT EXISTS activity_totals (
     actor_id TEXT PRIMARY KEY, name TEXT NOT NULL, created BIGINT NOT NULL DEFAULT 0, played BIGINT NOT NULL DEFAULT 0
 );
-INSERT INTO activity_totals(actor_id,name,created,played)
-SELECT actor_id,MAX(actor_name),SUM(CASE WHEN action='sound.create' THEN 1 ELSE 0 END),
-SUM(CASE WHEN action='sound.play' THEN 1 ELSE 0 END)
-FROM audit WHERE actor_id IS NOT NULL AND outcome='success' AND action IN ('sound.create','sound.play')
-AND NOT EXISTS (SELECT 1 FROM settings WHERE key='activity_totals_initialized')
-AND (guild_id IS NULL OR guild_id='1352422295402057759') GROUP BY actor_id
-ON CONFLICT(actor_id) DO NOTHING;
-INSERT INTO settings(key,value) VALUES ('activity_totals_initialized','true') ON CONFLICT(key) DO NOTHING;
 
-ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS received_order BIGSERIAL;
 CREATE INDEX IF NOT EXISTS conversation_messages_received ON conversation_messages(session_id,received_order);
 
 CREATE TABLE IF NOT EXISTS sound_play_totals (
     resource_id TEXT NOT NULL, actor_id TEXT NOT NULL, guild_id TEXT NOT NULL,
     played BIGINT NOT NULL DEFAULT 0, PRIMARY KEY(resource_id,actor_id,guild_id)
 );
-INSERT INTO sound_play_totals(resource_id,actor_id,guild_id,played)
-SELECT resource_id,COALESCE(actor_id,''),COALESCE(guild_id,'1352422295402057759'),COUNT(*)
-FROM audit WHERE action='sound.play' AND outcome='success' AND resource_id IS NOT NULL
-AND NOT EXISTS (SELECT 1 FROM settings WHERE key='sound_play_totals_initialized')
-GROUP BY resource_id,COALESCE(actor_id,''),COALESCE(guild_id,'1352422295402057759')
-ON CONFLICT(resource_id,actor_id,guild_id) DO NOTHING;
-INSERT INTO settings(key,value) VALUES ('sound_play_totals_initialized','true') ON CONFLICT(key) DO NOTHING;

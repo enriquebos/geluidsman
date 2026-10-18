@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { Check, X } from 'lucide-react'
 
 export function Toast({ text, error, onClose }: { text: string; error: boolean; onClose: () => void }) {
-  const top = useTopbarOffset()
+  const top = useTopbarOffset(true)
   const [leaving, setLeaving] = useState(false)
   useEffect(() => {
     const timer = setTimeout(() => setLeaving(true), 6000)

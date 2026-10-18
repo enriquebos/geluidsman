@@ -42,7 +42,10 @@ def digest(value: str) -> str:
 def internal_path(value: str) -> str:
     if any(ord(character) < ASCII_CONTROL_BOUNDARY for character in value):
         return "/soundboard"
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "/soundboard"
     if parsed.scheme or parsed.netloc or not value.startswith("/") or value.startswith("//") or "\\" in value:
         return "/soundboard"
     return value
@@ -169,16 +172,23 @@ class Auth:
             after = page[-1]["id"]
         return shared
 
+    def save_state(self, state: str, browser: str, destination: str) -> None:
+        now = time.time()
+        with self.db.lock, self.db.conn:
+            self.db.conn.execute("DELETE FROM oauth_states WHERE expires_at<?", (now,))
+            count = self.db.one("SELECT COUNT(*) AS total FROM oauth_states")
+            if count["total"] >= MAX_PENDING_LOGINS:
+                raise HTTPException(503, "Discord login is busy. Try again shortly.")
+            self.db.conn.execute(
+                "INSERT INTO oauth_states VALUES (?,?,?,?)",
+                (digest(state), digest(browser), internal_path(destination), now + STATE_SECONDS),
+            )
+
     async def begin(self, destination: str) -> RedirectResponse:
         if not self.configured:
             raise HTTPException(503, "Discord login is not configured.")
         state, browser = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-        await self.db.run(self.db.execute, "DELETE FROM oauth_states WHERE expires_at<?", (time.time(),))
-        await self.db.run(
-            self.db.execute,
-            "INSERT INTO oauth_states VALUES (?,?,?,?)",
-            (digest(state), digest(browser), internal_path(destination), time.time() + STATE_SECONDS),
-        )
+        await self.db.run(self.save_state, state, browser, destination)
         params = {
             "client_id": str(self.settings.discord_application_id),
             "response_type": "code",
@@ -314,7 +324,7 @@ class Auth:
             if csrf and request.method not in ("GET", "HEAD", "OPTIONS"):
                 origin = request.headers.get("origin")
                 if origin != self.settings.app_base_url.rstrip("/") or not secrets.compare_digest(
-                    request.headers.get("x-csrf-token", ""), session["csrf"]
+                    request.headers.get("x-csrf-token", "").encode(), session["csrf"].encode()
                 ):
                     raise HTTPException(403, "This request could not be verified. Reload and try again.")
             if session["checked_at"] < now - CHECK_SECONDS or not any(

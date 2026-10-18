@@ -25,12 +25,11 @@ test('playback bar toggles bot self mute and deafen without joining voice', asyn
   let deafened = true
   let connected = true
   let playing = false
-  await page.route('**/api/state*', async route => {
-    const response = await route.fetch()
-    const state = await response.json()
-    Object.assign(state.status, { bot_ready: true, connected, muted, deafened, playbacks: playing ? [{ id: 'mock', clip_id: 'mock', name: 'A very long sound name playing in the channel', started_at: 0, position: 0, duration: 10 }] : [] })
-    await route.fulfill({ response, json: state })
-  })
+  const baseState = await (await page.request.get('/api/state')).json()
+  await page.route('**/api/state*', route => route.fulfill({ json: {
+    ...baseState,
+    status: { ...baseState.status, bot_ready: true, connected, muted, deafened, playbacks: playing ? [{ id: 'mock', clip_id: 'mock', name: 'A very long sound name playing in the channel', started_at: 0, position: 0, duration: 10 }] : [] },
+  } }))
   await page.route('**/api/guilds/*/voice/state', route => {
     const body = route.request().postDataJSON()
     muted = body.muted

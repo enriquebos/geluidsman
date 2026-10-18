@@ -37,10 +37,10 @@ class Events:
 
     @staticmethod
     def for_viewer(message: str, request: Request) -> str | None:
+        if message.startswith(("event: music_likes\n", "event: fun.kirby\n")):
+            return Events.account_for_viewer(message, request)
         if message.startswith("event: fun.goose\n"):
             return Events.goose_for_viewer(message)
-        if message.startswith("event: fun.kirby\n"):
-            return Events.kirby_for_viewer(message, request)
         if not message.startswith("event: fun.play\n"):
             return message
         data = json.loads(message.split("data: ", 1)[1])
@@ -62,6 +62,13 @@ class Events:
         payload = {key: data[key] for key in ("effect", "instance_id", "channel_id")}
         payload["elapsed_ms"] = elapsed
         return f"event: fun.play\ndata: {json.dumps(payload)}\n\n"
+
+    @staticmethod
+    def account_for_viewer(message: str, request: Request) -> str | None:
+        if message.startswith("event: fun.kirby\n"):
+            return Events.kirby_for_viewer(message, request)
+        data = json.loads(message.split("data: ", 1)[1])
+        return "event: music_likes\ndata: {}\n\n" if request.state.user["id"] == data["user_id"] else None
 
     @staticmethod
     def goose_for_viewer(message: str) -> str | None:

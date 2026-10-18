@@ -277,3 +277,30 @@ def test_caption_search_index_is_populated_in_one_batch(tmp_path: Path) -> None:
     assert not db.search_captions("Hallo", "nl", None, 0, 50)
     assert len(db.search_captions("Hallo", "en", None, 0, 50)) == 1
     db.close()
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"events": [None]},
+        {"events": ["invalid"]},
+        {"events": [{"segs": None}]},
+        {"events": [{"segs": [None]}]},
+        {"events": [{"segs": ["invalid"]}]},
+    ],
+)
+def test_malformed_caption_events_and_segments_fail_only_the_caption_track(tmp_path: Path, document: dict) -> None:
+    async def verify() -> None:
+        db = Database(tmp_path / "malformed.sqlite3")
+        media = Media(Settings(_env_file=None, data_dir=tmp_path), db, Events())
+        filename = "caption-nl.json3"
+        (tmp_path / filename).write_text(json.dumps(document))
+        result = await media.caption_tracks(
+            {"captions": [{"language": "nl", "kind": "manual", "status": "downloaded", "file": filename}]}, tmp_path, 10
+        )
+        assert result[0]["status"] == "failed"
+        assert result[0]["cues"] == []
+        assert result[0]["error"] == "Caption track could not be parsed."
+        db.close()
+
+    asyncio.run(verify())

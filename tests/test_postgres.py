@@ -4,6 +4,7 @@ import json
 import os
 import time
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
 import pytest
@@ -11,9 +12,12 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from app.config import Settings
+from app.database_schema import SCHEMA_VERSION_KEY
 from app.db import Database
 from app.goose_sketches import Sketch, change_library, resolve_sketch
 from app.main import create_app
+from app.music_models import MusicTrack
+from app.music_store import MusicStore
 from app.postgres import Connection
 from tests.helpers import authenticated_fixture
 from tests.test_captions import source, track
@@ -193,3 +197,116 @@ def test_postgres_shared_goose_library_preserves_settings(database: Database) ->
     assert database.setting("fun_settings") == {"goose": True}
     change_library(database, None, saved["id"])
     assert database.setting("goose_sketches") == []
+
+
+def test_postgres_personal_music_likes_persist_and_feed_downloads(database: Database) -> None:
+    member = {"id": "200", "display_name": "Member"}
+    other = {"id": "300", "display_name": "Other"}
+    song = MusicTrack(provider="youtube", source_id="abcdefghijk", title="Song", duration=120).model_dump()
+    store = MusicStore(database)
+    first = store.set_like(member, song, liked=True)
+    assert first["keys"] == ["youtube:abcdefghijk"]
+    assert store.set_like(member, song, liked=True) == first
+    assert store.like_summary(other)["total"] == 0
+    assert json.loads(store.liked_cache_page("")[0]["tracks"]) == [song]
+    database.conn.initialize()
+    assert MusicStore(database).liked(member)["tracks"] == [song]
+    assert store.set_like(member, song, liked=False)["total"] == 0
+    assert store.liked(member)["tracks"] == []
+
+
+def test_postgres_music_library_membership_search_and_idempotence(database: Database) -> None:
+    user = {"id": "200", "display_name": "Member", "admin": False}
+    database.execute(
+        "INSERT INTO users(id,username,display_name,created_at,last_login) VALUES (?,?,?,?,?)",
+        ("200", "member", "Member", time.time(), time.time()),
+    )
+    store = MusicStore(database)
+    playlist = store.create("100%_beats!", user)
+    song = MusicTrack(provider="youtube", source_id="abcdefghijk", title="Song", duration=120).model_dump()
+    first = store.set_membership(playlist["id"], user, song, saved=True)
+    assert store.set_membership(playlist["id"], user, song, saved=True) == first
+    assert store.saved("youtube", "abcdefghijk") == {"saved": True}
+    identities = [
+        {"provider": "youtube", "source_id": "abcdefghijk"},
+        {"provider": "spotify", "source_id": "abcdefghijk"},
+        {"provider": "youtube", "source_id": "missing"},
+    ]
+    assert store.saved_tracks(identities * 2) == {"keys": ["youtube:abcdefghijk"]}
+    page = store.library(user, ("youtube", "abcdefghijk"), "%_beats!", (0, 50))
+    assert page["total"] == 1
+    assert page["playlists"][0]["saved"] is True
+    assert page["playlists"][0]["editable"] is True
+    assert "tracks" not in page["playlists"][0]
+    store.set_membership(playlist["id"], user, song, saved=False)
+    assert store.saved("youtube", "abcdefghijk") == {"saved": False}
+    assert store.saved_tracks(identities) == {"keys": []}
+
+
+def test_postgres_legacy_upgrade_preserves_rows_and_initializes_totals(database: Database) -> None:
+    database.execute(
+        "DELETE FROM settings WHERE key IN (?,?,?)",
+        (SCHEMA_VERSION_KEY, "activity_totals_initialized", "sound_play_totals_initialized"),
+    )
+    database.conn.raw.execute("ALTER TABLE clips ALTER COLUMN source_id SET NOT NULL")
+    database.conn.raw.execute("ALTER TABLE conversation_triggers DROP COLUMN action, DROP COLUMN delay")
+    database.conn.raw.execute("ALTER TABLE conversation_messages DROP COLUMN received_order")
+    database.execute(
+        "INSERT INTO users(id,username,display_name,created_at,last_login) VALUES (?,?,?,?,?)",
+        ("100", "member", "Member", 1, 1),
+    )
+    database.execute(
+        "INSERT INTO conversations(id,channel_id,channel_name,started_at) VALUES (?,?,?,?)",
+        ("session", "123", "Voice", 1),
+    )
+    database.execute(
+        "INSERT INTO conversation_messages(id,session_id,speaker_id,speaker_name,started_at,ended_at,text,language) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        ("message", "session", "100", "Member", 1, 2, "hello", "nl"),
+    )
+    database.execute(
+        "INSERT INTO conversation_triggers(id,owner_id,clip_id,phrase,mode,target,speakers,cooldown,enabled,"
+        "created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("trigger", "100", "clip", "hello", "contains", "everyone", "[]", 5, 1, 1),
+    )
+    database.execute(
+        "INSERT INTO audit(timestamp,actor_id,actor_name,action,resource_id,resource_name,outcome,guild_id,details) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (1, "100", "Member", "sound.play", "clip", "Sound", "success", "1352422295402057759", "{}"),
+    )
+    database.conn.initialize()
+    assert database.setting(SCHEMA_VERSION_KEY) == 1
+    assert database.one("SELECT action,delay FROM conversation_triggers WHERE id='trigger'") == {
+        "action": "play",
+        "delay": 0,
+    }
+    assert database.one("SELECT text,received_order FROM conversation_messages WHERE id='message'") == {
+        "text": "hello",
+        "received_order": 1,
+    }
+    assert database.one("SELECT played FROM activity_totals WHERE actor_id='100'") == {"played": 1}
+    assert database.one("SELECT played FROM sound_play_totals WHERE resource_id='clip'") == {"played": 1}
+    database.execute(
+        "INSERT INTO clips(id,source_id,name,emoji,tags,start,end,volume,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ("uploaded", None, "Upload", "", "[]", 0, 1, 1, 1),
+    )
+    database.execute("DELETE FROM audit")
+    database.conn.initialize()
+    assert database.one("SELECT played FROM activity_totals WHERE actor_id='100'") == {"played": 1}
+    assert database.one("SELECT played FROM sound_play_totals WHERE resource_id='clip'") == {"played": 1}
+
+
+def test_postgres_failed_legacy_upgrade_rolls_back_schema_changes(database: Database) -> None:
+    database.execute("DELETE FROM settings WHERE key=?", (SCHEMA_VERSION_KEY,))
+    database.conn.raw.execute("ALTER TABLE conversation_triggers DROP COLUMN action, DROP COLUMN delay")
+    with patch("app.database_schema.seed_totals", side_effect=RuntimeError), pytest.raises(RuntimeError):
+        database.conn.initialize()
+    columns = database.rows(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() "
+        "AND table_name='conversation_triggers'"
+    )
+    assert not {"action", "delay"} & {row["column_name"] for row in columns}
+    assert database.setting(SCHEMA_VERSION_KEY) is None
+    database.conn.initialize()
+    assert database.setting(SCHEMA_VERSION_KEY) == 1
