@@ -4,6 +4,7 @@ async function dashboard(page: Page, mode: 'soundboard' | 'music' = 'soundboard'
   const base = await (await page.request.get('/api/state')).json()
   const user = { ...base.user, preferences: { ...base.user.preferences, soundboard_mode: compact ? 'compact' : 'default' }, permissions: { ...base.user.permissions, view_music: true, control_music: true, switch_audio_mode: true } }
   let status = { ...base.status, connected: true, bot_ready: true, channel_id: 'voice', channel_name: 'Fixture music room', audio_mode: mode, participants: [{ id: user.id, name: user.display_name }], playbacks: [] }
+  await page.route('**/api/media/lease', route => route.fulfill({ json: { ok: true } }))
   await page.addInitScript(() => {
     class FixtureEvents extends EventTarget {
       constructor() { super(); Object.assign(window, { navigationEvents: this }) }
@@ -42,19 +43,19 @@ test('compact primary navigation groups existing page URLs with back and reload 
   await expect(board.getByRole('button', { name: /Video library/ })).toHaveAttribute('aria-current', 'page')
   await main.getByRole('button', { name: 'Settings', exact: true }).click()
   const settings = page.getByRole('navigation', { name: 'Settings navigation', exact: true })
-  await expect(settings.getByRole('button')).toHaveCount(3)
+  await expect(settings.getByRole('button')).toHaveCount(10)
   await settings.getByRole('button', { name: 'Audit log', exact: true }).click()
   await expect(page).toHaveURL('/audit')
   await expect(main.getByRole('button', { name: 'Settings', exact: true })).toHaveAttribute('aria-current', 'page')
-  await settings.getByRole('button', { name: 'Admin', exact: true }).click()
-  await expect(page).toHaveURL('/admin')
-  await expect(page.getByRole('heading', { name: 'Application console', exact: true })).toBeVisible()
+  await settings.getByRole('button', { name: 'Application console', exact: true }).click()
+  await expect(page).toHaveURL('/admin?tab=console')
+  await expect(page.getByRole('heading', { name: 'Application console.', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Pause logs', exact: true }).click()
-  await page.getByRole('tab', { name: 'Conversation', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Conversation', exact: true }).click()
   await expect(page).toHaveURL('/admin?tab=conversation')
-  await expect(page.getByRole('button', { name: 'Resume logs', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Resume logs', exact: true })).toBeHidden()
   await page.goBack()
-  await expect(page.getByRole('tab', { name: 'Settings', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Application console', exact: true })).toHaveAttribute('aria-current', 'page')
   await page.screenshot({ path: `test-results/navigation-settings-${test.info().project.name}.png`, fullPage: true })
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy()
 })

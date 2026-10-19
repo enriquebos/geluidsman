@@ -2,44 +2,64 @@ import { KeyboardEvent, PointerEvent, ReactNode, useEffect, useId, useLayoutEffe
 import { GripVertical } from 'lucide-react'
 
 type Item = { id: string; label: string }
+const ghostStyles = ['display', 'position', 'box-sizing', 'width', 'height', 'min-width', 'min-height', 'max-width', 'max-height', 'flex', 'flex-direction', 'flex-wrap', 'align-items', 'justify-content', 'gap', 'padding', 'margin', 'font', 'line-height', 'letter-spacing', 'color', 'opacity', 'overflow', 'text-overflow', 'white-space']
 type Gesture = { id: string; ids: string[]; initial: string[]; keyboard: boolean; active: boolean; pointer?: number; x: number; y: number; startX: number; startY: number; offsetX: number; offsetY: number; width: number; height: number; scroll: number; scroller: HTMLElement | null; ghost: HTMLElement | null; rows: Map<string, { node: HTMLElement; top: number; height: number }>; timer?: ReturnType<typeof setTimeout>; frame?: number; scrolling?: boolean }
 
-export function MusicSortable<T extends Item>({ items, label, disabled, onReorder, children, rowClass = '', wholeRow = false }: { items: T[]; label: string; disabled: boolean; onReorder: (items: T[]) => Promise<unknown> | void; children: (item: T, handle: ReactNode) => ReactNode; rowClass?: string; wholeRow?: boolean }) {
+export function MusicSortable<T extends Item>({ items, label, disabled, onReorder, children, rowClass = '', wholeRow = false }: { items: T[]; label: string; disabled: boolean; onReorder: (items: T[]) => Promise<unknown> | void; children: (item: T, handle: ReactNode, position: number) => ReactNode; rowClass?: string; wholeRow?: boolean }) {
   const instructions = useId()
   const list = useRef<HTMLDivElement>(null)
   const gesture = useRef<Gesture | null>(null)
-  const [order, setOrder] = useState<string[] | null>(null)
+  const [order, setOrder] = useState<{ base: string; ids: string[] } | null>(null)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [announcement, setAnnouncement] = useState('')
   const suppressClick = useRef(false)
   const key = JSON.stringify(items.map(item => item.id))
   const latest = useRef({ items, disabled, onReorder })
   latest.current = { items, disabled, onReorder }
-  useEffect(() => { cleanup(); setOrder(null) }, [key])
-  useEffect(() => { if (disabled && gesture.current) { cleanup(); setOrder(null) } }, [disabled])
-  useEffect(() => () => cleanup(false), [])
+  const lookup = new Map(items.map(item => [item.id, item]))
+  const ordered = order?.base === key ? order.ids.map(id => lookup.get(id)).filter((item): item is T => Boolean(item)) : items
+  const displayKey = JSON.stringify(ordered.map(item => item.id))
+  const animations = useRef<Animation[]>([])
+  const captured = useRef<Map<string, number> | null>(null)
+  const focused = useRef<HTMLElement | null>(null)
+  const saving = useRef(false)
+  const [settling, setSettling] = useState(false)
+  useLayoutEffect(() => { cleanup(); setOrder(null) }, [key])
+  useLayoutEffect(() => { if (disabled && gesture.current) { capture(); cleanup(); setOrder(null) } }, [disabled])
+  useEffect(() => () => { cleanup(false); animations.current.forEach(animation => animation.cancel()) }, [])
   const positions = useRef(new Map<string, number>())
   useLayoutEffect(() => {
     const nodes = [...list.current?.querySelectorAll<HTMLElement>(':scope > [data-music-sort-id]') || []]
-    const previous = positions.current
-    positions.current = new Map(nodes.map(node => [node.dataset.musicSortId!, node.offsetTop]))
-    if (gesture.current || previous.size !== nodes.length || !nodes.every(node => previous.has(node.dataset.musicSortId!)) || matchMedia('(prefers-reduced-motion: reduce)').matches) return
-    const animations: Animation[] = []
+    const previous = captured.current || positions.current
+    captured.current = null
+    if (focused.current?.isConnected && document.activeElement === document.body) focused.current.focus({ preventScroll: true })
+    focused.current = null
+    animations.current.forEach(animation => animation.cancel())
+    animations.current = []
+    const top = list.current?.getBoundingClientRect().top || 0
+    positions.current = new Map(nodes.map(node => [node.dataset.musicSortId!, node.getBoundingClientRect().top - top]))
+    if (gesture.current && !gesture.current.keyboard || previous.size !== nodes.length || !nodes.every(node => previous.has(node.dataset.musicSortId!)) || matchMedia('(prefers-reduced-motion: reduce)').matches) return
     for (const node of nodes) {
-      const delta = previous.get(node.dataset.musicSortId!)! - node.offsetTop
-      if (!delta) continue
+      const delta = previous.get(node.dataset.musicSortId!)! - positions.current.get(node.dataset.musicSortId!)!
+      if (Math.abs(delta) < .5) continue
       const bounds = node.getBoundingClientRect()
       if (bounds.bottom < 0 || bounds.top > window.innerHeight) continue
-      animations.push(node.animate([{ transform: `translateY(${delta}px)` }, { transform: 'translateY(0)' }], { duration: 200, easing: 'cubic-bezier(.2,.75,.3,1)' }))
+      animations.current.push(node.animate([{ transform: `translateY(${delta}px)` }, { transform: 'translateY(0)' }], { duration: 180, easing: 'cubic-bezier(.2,.75,.3,1)' }))
     }
-    return () => animations.forEach(animation => animation.cancel())
-  }, [key])
-  const lookup = new Map(items.map(item => [item.id, item]))
-  const ordered = order ? order.map(id => lookup.get(id)).filter((item): item is T => Boolean(item)) : items
+  }, [displayKey, activeId])
+
+  function capture() {
+    focused.current = list.current?.contains(document.activeElement) ? document.activeElement as HTMLElement : null
+    const top = list.current?.getBoundingClientRect().top || 0
+    captured.current = new Map([...list.current?.querySelectorAll<HTMLElement>(':scope > [data-music-sort-id]') || []].map(node => [node.dataset.musicSortId!, node.getBoundingClientRect().top - top]))
+    const active = gesture.current
+    if (active?.ghost) captured.current.set(active.id, active.ghost.getBoundingClientRect().top - top)
+  }
 
   function cleanup(update = true) {
     const active = gesture.current
     gesture.current = null
+    list.current?.classList.remove('music-sort-pointer')
     if (active) {
       clearTimeout(active.timer)
       if (active.frame) cancelAnimationFrame(active.frame)
@@ -59,11 +79,17 @@ export function MusicSortable<T extends Item>({ items, label, disabled, onReorde
     clearTimeout(active.timer)
     setActiveId(active.id)
     announce(active.id, active.ids, 'Picked up')
-    if (active.keyboard) { setOrder(active.ids); return }
+    if (active.keyboard) { setOrder({ base: key, ids: active.ids }); return }
     const source = active.rows.get(active.id)?.node
     if (!source) return
     const box = source.getBoundingClientRect()
     const ghost = source.cloneNode(true) as HTMLElement
+    const originals = [source, ...source.querySelectorAll<HTMLElement | SVGElement>('*')]
+    const copies = [ghost, ...ghost.querySelectorAll<HTMLElement | SVGElement>('*')]
+    originals.forEach((node, index) => {
+      const style = getComputedStyle(node)
+      for (const property of ghostStyles) copies[index].style.setProperty(property, style.getPropertyValue(property))
+    })
     ghost.removeAttribute('data-music-sort-id')
     ghost.removeAttribute('tabindex')
     for (const node of ghost.querySelectorAll('[id]')) node.removeAttribute('id')
@@ -73,14 +99,16 @@ export function MusicSortable<T extends Item>({ items, label, disabled, onReorde
     ghost.classList.remove('music-sort-placeholder', 'music-dragging')
     Object.assign(ghost.style, { position: 'fixed', left: `${box.left}px`, top: '0', width: `${box.width}px`, height: `${box.height}px`, margin: '0', transform: `translate3d(0,${box.top}px,0)` })
     document.body.appendChild(ghost)
+    list.current?.classList.add('music-sort-pointer')
     active.ghost = ghost
     source.classList.add('music-sort-placeholder')
     suppressClick.current = true
     active.frame = requestAnimationFrame(tick)
   }
   function start(id: string, keyboard: boolean, event?: PointerEvent<HTMLElement>, immediate = false) {
-    if (latest.current.disabled || gesture.current) return
-    const ids = (order || latest.current.items.map(item => item.id)).slice()
+    if (latest.current.disabled || gesture.current || saving.current) return
+    animations.current.forEach(animation => animation.cancel())
+    const ids = (order?.base === key ? order.ids : latest.current.items.map(item => item.id)).slice()
     const rows = new Map<string, { node: HTMLElement; top: number; height: number }>()
     for (const node of list.current?.querySelectorAll<HTMLElement>(':scope > [data-music-sort-id]') || []) {
       const box = node.getBoundingClientRect()
@@ -103,7 +131,7 @@ export function MusicSortable<T extends Item>({ items, label, disabled, onReorde
     ids.splice(from, 1)
     ids.splice(target, 0, active.id)
     active.ids = ids
-    if (active.keyboard) setOrder(ids)
+    if (active.keyboard) { capture(); setOrder({ base: key, ids }) }
     else {
       let top = active.rows.get(active.initial[0])!.top
       for (const id of ids) {
@@ -134,14 +162,26 @@ export function MusicSortable<T extends Item>({ items, label, disabled, onReorde
   function finish(cancelled = false) {
     const active = gesture.current
     if (!active) return
+    if (active.active) capture()
     cleanup()
     if (!active.keyboard) setTimeout(() => { suppressClick.current = false }, 0)
     if (!active.active) return
     announce(active.id, cancelled ? active.initial : active.ids, cancelled ? 'Cancelled moving' : 'Dropped')
     if (!cancelled && !latest.current.disabled && active.ids.some((id, index) => id !== active.initial[index])) {
       const byId = new Map(latest.current.items.map(item => [item.id, item]))
-      setOrder(active.ids)
-      void Promise.resolve(latest.current.onReorder(active.ids.map(id => byId.get(id)).filter((item): item is T => Boolean(item)))).finally(() => { if (!gesture.current) setOrder(null) })
+      setOrder({ base: key, ids: active.ids })
+      saving.current = true
+      setSettling(true)
+      const settle = () => {
+        if (gesture.current) return
+        const nodes = [...list.current?.querySelectorAll<HTMLElement>(':scope > [data-music-sort-id]') || []]
+        if (nodes.some((node, index) => node.dataset.musicSortId !== latest.current.items[index]?.id)) capture()
+        setOrder(null)
+      }
+      void Promise.resolve().then(() => latest.current.onReorder(active.ids.map(id => byId.get(id)).filter((item): item is T => Boolean(item)))).then(settle, settle).finally(() => {
+        saving.current = false
+        setSettling(false)
+      })
     } else setOrder(null)
   }
   function pointerMove(event: PointerEvent<HTMLElement>) {
@@ -187,5 +227,5 @@ export function MusicSortable<T extends Item>({ items, label, disabled, onReorde
       move(event.key === 'Home' ? 0 : event.key === 'End' ? active.ids.length - 1 : index + (event.key === 'ArrowUp' ? -1 : 1))
     }
   }
-  return <><p id={instructions} className="sr-only">{wholeRow ? 'Drag a song to reorder. On touch, hold briefly before dragging.' : 'Drag the handle to reorder.'} With a keyboard, press Space to pick up, use Up and Down arrows to move, then Space to drop. Escape cancels.</p><div ref={list} className="music-tracks music-sortable" aria-label={label} onPointerDownCapture={() => { if (!gesture.current) suppressClick.current = false }}>{ordered.map(item => <article key={item.id} data-music-sort-id={item.id} className={`music-track ${rowClass} ${wholeRow && !disabled ? 'music-sort-whole' : ''} ${activeId === item.id ? `music-dragging ${gesture.current?.keyboard ? '' : 'music-sort-placeholder'}` : ''}`} tabIndex={wholeRow && !disabled ? 0 : undefined} aria-label={wholeRow ? `Reorder ${item.label}` : undefined} aria-describedby={wholeRow ? instructions : undefined} onPointerDown={wholeRow ? event => pointerDown(event, item.id, false) : undefined} onPointerMove={wholeRow ? pointerMove : undefined} onPointerUp={wholeRow ? pointerUp : undefined} onPointerCancel={wholeRow ? () => finish(true) : undefined} onLostPointerCapture={wholeRow ? () => { if (gesture.current && !gesture.current.keyboard) finish(true) } : undefined} onClickCapture={event => { if (suppressClick.current) { event.preventDefault(); event.stopPropagation(); suppressClick.current = false } }} onKeyDown={wholeRow ? event => keyboard(event, item.id) : undefined} onBlur={wholeRow ? event => { if (event.target === event.currentTarget && gesture.current?.keyboard) finish(true) } : undefined}>{children(item, <button className="icon-button music-drag-handle" aria-label={`Reorder ${item.label}`} aria-describedby={instructions} aria-pressed={activeId === item.id} title="Drag to reorder" disabled={disabled} onPointerDown={event => pointerDown(event, item.id, true)} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={() => finish(true)} onLostPointerCapture={() => { if (gesture.current && !gesture.current.keyboard) finish(true) }} onKeyDown={event => keyboard(event, item.id)} onBlur={() => { if (gesture.current?.keyboard) finish(true) }}><GripVertical size={17} /></button>)}</article>)}</div><span className="sr-only" role="status" aria-live="polite">{announcement}</span></>
+  return <><p id={instructions} className="sr-only">{wholeRow ? 'Drag a song to reorder. On touch, hold briefly before dragging.' : 'Drag the handle to reorder.'} With a keyboard, press Space to pick up, use Up and Down arrows to move, then Space to drop. Escape cancels.</p><div ref={list} className="music-tracks music-sortable" aria-label={label} aria-busy={settling || undefined} onPointerDownCapture={() => { if (!gesture.current) suppressClick.current = false }}>{ordered.map((item, position) => <article key={item.id} data-music-sort-id={item.id} className={`music-track ${rowClass} ${wholeRow && !disabled ? 'music-sort-whole' : ''} ${activeId === item.id ? `music-dragging ${gesture.current?.keyboard ? '' : 'music-sort-placeholder'}` : ''}`} tabIndex={wholeRow ? disabled || settling ? -1 : 0 : undefined} aria-label={wholeRow ? `Reorder ${item.label}` : undefined} aria-describedby={wholeRow ? instructions : undefined} onPointerDown={wholeRow ? event => pointerDown(event, item.id, false) : undefined} onPointerMove={wholeRow ? pointerMove : undefined} onPointerUp={wholeRow ? pointerUp : undefined} onPointerCancel={wholeRow ? () => finish(true) : undefined} onLostPointerCapture={wholeRow ? () => { if (gesture.current && !gesture.current.keyboard) finish(true) } : undefined} onClickCapture={event => { if (suppressClick.current) { event.preventDefault(); event.stopPropagation(); suppressClick.current = false } }} onKeyDown={wholeRow ? event => keyboard(event, item.id) : undefined} onBlur={wholeRow ? event => { if (event.target === event.currentTarget && gesture.current?.keyboard) finish(true) } : undefined}>{children(item, <button className="icon-button music-drag-handle" aria-label={`Reorder ${item.label}`} aria-describedby={instructions} aria-pressed={activeId === item.id} title="Drag to reorder" disabled={disabled || settling} onPointerDown={event => pointerDown(event, item.id, true)} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={() => finish(true)} onLostPointerCapture={() => { if (gesture.current && !gesture.current.keyboard) finish(true) }} onKeyDown={event => keyboard(event, item.id)} onBlur={() => { if (gesture.current?.keyboard) finish(true) }}><GripVertical size={17} /></button>, position)}</article>)}</div><span className="sr-only" role="status" aria-live="polite">{announcement}</span></>
 }

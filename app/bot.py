@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -11,6 +12,7 @@ import discord
 from app.discord_voice import VoiceRecvClient
 from app.fun import SOUND_EFFECTS, FunSettings, KirbyGuard
 from app.mixer import Mixer
+from app.permissions import can_use_voice_channel, effective_permissions
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -407,15 +409,27 @@ class GuildVoice:
                 continue
         repair.result()
 
+    async def authorize_mode_change(self, user_id: str) -> None:
+        user = await self.db.run(self.db.one, "SELECT permission_overrides FROM users WHERE id=?", (user_id,))
+        permissions = effective_permissions(
+            json.loads(user["permission_overrides"]) if user else {},
+            admin=user_id in self.settings.app_admin_ids,
+        )
+        if not user or not permissions["view_music"] or not permissions["switch_audio_mode"]:
+            message = "You do not have permission to switch modes."
+            raise VoiceError(message)
+        if (
+            not self.voice
+            or not self.voice.is_connected()
+            or not can_use_voice_channel(user_id, permissions, self.voice.channel)
+        ):
+            message = "Join the bot's voice channel to switch modes."
+            raise VoiceError(message)
+
     async def select_mode(self, mode: str, user_id: str | None = None) -> None:
         async with self.lock:
-            if user_id is not None and (
-                not self.voice
-                or not self.voice.is_connected()
-                or not any(str(member.id) == user_id and not member.bot for member in self.voice.channel.members)
-            ):
-                message = "Join the bot's voice channel to switch modes."
-                raise VoiceError(message)
+            if user_id is not None:
+                await self.authorize_mode_change(user_id)
             if mode == self.audio_mode:
                 return
             previous = self.audio_mode
@@ -606,9 +620,10 @@ class Bot:
                 pending.cancel()
                 await asyncio.gather(pending, return_exceptions=True)
 
-    async def guild_members(self) -> list[JsonObject]:
+    async def guild_members(self, *, fresh: bool = False) -> list[JsonObject]:
+        requested = time.monotonic()
         async with self.directory_lock:
-            if time.monotonic() < self.directory_expires:
+            if self.directory_expires - 60 >= requested or (not fresh and requested < self.directory_expires):
                 return self.directory_cache
             if not self.client.is_ready():
                 message = "Discord is offline. Try the speaker list again shortly."
@@ -641,7 +656,7 @@ class Bot:
 
     def emojis_changed(self, guild_id: int) -> None:
         if guild_id == self.settings.discord_guild_id:
-            self.events.publish("refresh")
+            self.events.publish("interface")
 
     async def remember_guild_names(self) -> None:
         for guild in self.client.guilds:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import inspect
 import math
 import random
 import time
@@ -15,7 +16,7 @@ from app.music_cache import QUEUE_PREFETCH
 from app.music_diagnostics import log_music_failure
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from app.bot import GuildVoice
     from app.config import Settings
@@ -33,12 +34,21 @@ PREVIOUS_RESTART_SECONDS = 3
 REPEAT_MODES = ("off", "one", "all")
 
 
+async def verify_guard(guard: Callable[[], Awaitable[None] | None] | None) -> None:
+    if guard:
+        result = guard()
+        if inspect.isawaitable(result):
+            await result
+
+
 class PlayerSources(Protocol):
     async def source(self, track: dict, position: float, volume: float) -> discord.AudioSource: ...
 
 
 class PlayerStore(Protocol):
     def load_player(self) -> dict: ...
+
+    def saved_sources(self) -> dict: ...
 
     def save_player(self, payload: dict) -> None: ...
 
@@ -78,7 +88,10 @@ class MusicPlayer:
         self.retry = 0
         self.closed = False
         self.background: set[asyncio.Task] = set()
+        self.media_management = None
+        self.reference_snapshot: tuple = ()
         self.priority: tuple[tuple[str, str, str], ...] = ()
+        self.normalization: tuple[str, dict] | None = None
 
     async def start(self) -> None:
         async with self.lock:
@@ -108,10 +121,102 @@ class MusicPlayer:
             self.started_entry_id = payload.get("started_entry_id")
             self.prioritize_manual()
             self.prune_history()
+            await self.restore_saved_sources()
             self.state = "paused" if self.current else "idle"
             self.closed = False
             self.checkpoint = asyncio.create_task(self.checkpoints())
             self.notify()
+
+    @staticmethod
+    def saved_entry(entry: dict, playlist_id: str, owner: str) -> bool:
+        reference = entry.get("saved_origin") or {}
+        identity = reference.get("playlist_id") or entry.get("playlist_id")
+        if identity and identity.startswith("liked:"):
+            identity = "liked"
+        user_id = reference.get("owner_id") or entry.get("requester_id")
+        return identity == playlist_id and (playlist_id != "liked" or user_id == owner)
+
+    @staticmethod
+    def recording_identity(track: dict) -> tuple:
+        return track["provider"], track["source_id"], track.get("upload_id"), track.get("youtube_id")
+
+    def replace_saved_entries(self, playlist_id: str, owner: str, old: dict, new: dict) -> bool:
+        changed = False
+        pending = self.queue[self.index + 1 :] if self.index is not None else []
+        for entry in [*pending, *self.playlist_entries, *self.manual_entries]:
+            if (
+                self.saved_entry(entry, playlist_id, owner)
+                and self.recording_identity(entry["track"]) == self.recording_identity(old)
+                and entry["track"] != new
+            ):
+                entry["track"] = copy.deepcopy(new)
+                entry.pop("error", None)
+                changed = True
+        return changed
+
+    async def edit_saved_source(
+        self,
+        playlist_id: str,
+        owner: str,
+        old: dict,
+        index: int,
+        commit: Callable[[], Awaitable[dict]],
+        *,
+        publish: Callable[[], Awaitable[dict]],
+    ) -> dict:
+        async def apply() -> dict:
+            async with self.lock:
+                result = await commit()
+                if self.replace_saved_entries(playlist_id, owner, old, result["tracks"][index]):
+                    await self.save()
+                    self.notify()
+                return await publish()
+
+        task = asyncio.create_task(apply())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    async def confirm_saved_tracks(self, tracks: list[dict], reference: dict | None) -> None:
+        if not reference:
+            return
+        collections = await self.db.run(self.store.saved_sources)
+        playlist_id = reference["playlist_id"]
+        candidates = collections.get((playlist_id, reference.get("owner_id", "") if playlist_id == "liked" else ""), [])
+        if any(
+            not any(
+                self.recording_identity(track) == self.recording_identity(current)
+                and track["title"] == current["title"]
+                for current in candidates
+            )
+            for track in tracks
+        ):
+            message = "This saved recording changed. Review the current song before adding it to the queue."
+            raise ValueError(message)
+
+    async def restore_saved_sources(self) -> None:
+        entries = self.queue[self.index + 1 :] if self.index is not None else []
+        collections = await self.db.run(self.store.saved_sources)
+        changed = False
+        for entry in list(entries):
+            reference = entry.get("saved_origin") or {}
+            playlist_id = reference.get("playlist_id") or entry.get("playlist_id")
+            if playlist_id and playlist_id.startswith("liked:"):
+                playlist_id = "liked"
+            owner = reference.get("owner_id") or entry.get("requester_id", "")
+            tracks = collections.get((playlist_id, owner if playlist_id == "liked" else ""), [])
+            old = entry["track"]
+            candidates = [
+                track
+                for track in tracks
+                if (track["provider"], track["source_id"]) == (old["provider"], old["source_id"])
+            ]
+            if len(candidates) == 1:
+                changed = self.replace_saved_entries(playlist_id, owner, old, candidates[0]) or changed
+        if changed:
+            await self.save()
 
     @property
     def current(self) -> dict | None:
@@ -149,12 +254,18 @@ class MusicPlayer:
             if self.index is not None
             else []
         )
-        priority = tuple((track["provider"], track["source_id"], track.get("youtube_id") or "") for track in tracks)
+        priority = tuple(
+            (track["provider"], track["source_id"], track.get("upload_id") or track.get("youtube_id") or "")
+            for track in tracks
+        )
         prioritize = getattr(self.sources, "prioritize", None)
         if priority != self.priority and callable(prioritize):
             self.priority = priority
             prioritize(tracks)
-        self.events.publish("music")
+        references = (self.index, tuple((entry["id"], self.recording_identity(entry["track"])) for entry in self.queue))
+        changed = references != self.reference_snapshot
+        self.reference_snapshot = references
+        self.events.publish("music", {"scope": "music.queue" if changed else "music.playback"})
 
     async def save(self) -> None:
         await self.db.run(
@@ -219,7 +330,10 @@ class MusicPlayer:
         source = None
         transferred = False
         try:
-            source = await self.sources.source(entry["track"], self.position, self.volume())
+            track = dict(entry["track"])
+            if self.normalization and self.normalization[0] == entry["id"]:
+                track["_playback_normalization"] = self.normalization[1]
+            source = await self.sources.source(track, self.position, self.volume())
             async with self.lock:
                 if generation != self.generation or self.closed:
                     return
@@ -231,11 +345,16 @@ class MusicPlayer:
                     return
                 self.current["track"] = copy.deepcopy(getattr(source, "music_track", entry["track"]))
                 self.source = source
+                if isinstance(measured := getattr(source, "music_normalization", None), dict):
+                    self.normalization = (entry["id"], measured)
                 self.update_volume()
                 self.started_at = time.monotonic()
                 self.state = "playing"
                 play = getattr(voice, "play_music", None) or voice.play
                 play(source, bitrate=384, after=lambda error: self.completed(generation, error))
+                if self.media_management:
+                    key = self.sources.cache.entry_key(entry["track"])
+                    self.media_management.touch("music:" + key)
                 transferred = True
                 self.remember()
                 self.error = None
@@ -313,6 +432,7 @@ class MusicPlayer:
             self.notify()
 
     def advance(self, *, ignore_repeat: bool = False) -> None:
+        self.normalization = None
         self.position = 0.0
         self.started_entry_id = None
         if self.index is None:
@@ -331,7 +451,7 @@ class MusicPlayer:
     def restart_cycle(self) -> None:
         cycle = self.playlist_entries or self.manual_entries
         if not cycle:
-            self.index = 0 if self.queue else None
+            self.index = None
             return
         entries = copy.deepcopy(cycle)
         for entry in entries:
@@ -433,11 +553,10 @@ class MusicPlayer:
             await asyncio.gather(*tuple(self.background), return_exceptions=True)
 
     async def command(
-        self, action: str, value: float | None = None, *, guard: Callable[[], None] | None = None
+        self, action: str, value: float | None = None, *, guard: Callable[[], Awaitable[None] | None] | None = None
     ) -> dict:
         async with self.lock:
-            if guard:
-                guard()
+            await verify_guard(guard)
             self.error = None
             if action == "pause":
                 self.halt()
@@ -503,6 +622,7 @@ class MusicPlayer:
         elif action == "seek":
             self.position = min(float(value), self.current["track"]["duration"]) if self.current else 0
         else:
+            self.normalization = None
             self.position = 0
             active = False
         self.state = "paused" if self.current else "idle"
@@ -510,16 +630,25 @@ class MusicPlayer:
             self.require_voice()
             self.launch()
 
-    async def play_now(self, track: dict, user: dict, *, guard: Callable[[], None] | None = None) -> dict:
+    async def play_now(
+        self,
+        track: dict,
+        user: dict,
+        *,
+        guard: Callable[[], Awaitable[None] | None] | None = None,
+        saved_origin: dict | None = None,
+    ) -> dict:
         async with self.lock:
-            if guard:
-                guard()
+            await verify_guard(guard)
+            await self.confirm_saved_tracks([track], saved_origin)
             self.require_voice()
             pending = self.pending_start()
             self.queue_capacity(1, interrupt=self.index is not None and pending > self.index)
             index = self.pending_start()
             self.halt()
             entry = self.entry(track, user)
+            if saved_origin:
+                entry["saved_origin"] = dict(saved_origin)
             self.queue.insert(index, entry)
             self.manual_entries = [*self.manual_entries, copy.deepcopy(entry)][-QUEUE_LIMIT:]
             self.index, self.position, self.failures, self.error = index, 0, 0, None
@@ -529,11 +658,15 @@ class MusicPlayer:
             return self.snapshot()
 
     async def play_playlist(
-        self, tracks: list[dict], user: dict, playlist: dict, *, guard: Callable[[], None] | None = None
+        self,
+        tracks: list[dict],
+        user: dict,
+        playlist: dict,
+        *,
+        guard: Callable[[], Awaitable[None] | None] | None = None,
     ) -> dict:
         async with self.lock:
-            if guard:
-                guard()
+            await verify_guard(guard)
             self.require_voice()
             if not tracks:
                 msg = "Add a song to this playlist before playing."
@@ -557,13 +690,23 @@ class MusicPlayer:
             self.notify()
             return self.snapshot()
 
-    async def enqueue(self, tracks: list[dict], user: dict, *, guard: Callable[[], None] | None = None) -> dict:
+    async def enqueue(
+        self,
+        tracks: list[dict],
+        user: dict,
+        *,
+        guard: Callable[[], Awaitable[None] | None] | None = None,
+        saved_origin: dict | None = None,
+    ) -> dict:
         async with self.lock:
-            if guard:
-                guard()
+            await verify_guard(guard)
+            await self.confirm_saved_tracks(tracks, saved_origin)
             self.queue_capacity(len(tracks))
             first = len(self.queue)
             entries = [self.entry(track, user) for track in tracks]
+            if saved_origin:
+                for entry in entries:
+                    entry["saved_origin"] = dict(saved_origin)
             self.queue.extend(entries)
             self.manual_entries = [*self.manual_entries, *copy.deepcopy(entries)][-QUEUE_LIMIT:]
             if self.index is None and tracks:
@@ -575,10 +718,9 @@ class MusicPlayer:
             self.notify()
             return self.snapshot()
 
-    async def clear(self, *, guard: Callable[[], None] | None = None) -> dict:
+    async def clear(self, *, guard: Callable[[], Awaitable[None] | None] | None = None) -> dict:
         async with self.lock:
-            if guard:
-                guard()
+            await verify_guard(guard)
             self.halt()
             self.queue.clear()
             self.index = None
@@ -593,10 +735,9 @@ class MusicPlayer:
             self.notify()
             return self.snapshot()
 
-    async def remove(self, entry_id: str, *, guard: Callable[[], None] | None = None) -> dict:
+    async def remove(self, entry_id: str, *, guard: Callable[[], Awaitable[None] | None] | None = None) -> dict:
         async with self.lock:
-            if guard:
-                guard()
+            await verify_guard(guard)
             index = self.entry_index(entry_id)
             active = self.state in {"playing", "buffering"}
             current = index == self.index
@@ -605,6 +746,7 @@ class MusicPlayer:
                 self.position = 0
             self.queue.pop(index)
             self.manual_entries = [entry for entry in self.manual_entries if entry["id"] != entry_id]
+            self.playlist_entries = [entry for entry in self.playlist_entries if entry["id"] != entry_id]
             if current:
                 self.started_entry_id = None
                 self.index = index if index < len(self.queue) else None
@@ -617,10 +759,9 @@ class MusicPlayer:
             self.notify()
             return self.snapshot()
 
-    async def reorder(self, ids: list[str], *, guard: Callable[[], None] | None = None) -> dict:
+    async def reorder(self, ids: list[str], *, guard: Callable[[], Awaitable[None] | None] | None = None) -> dict:
         async with self.lock:
-            if guard:
-                guard()
+            await verify_guard(guard)
             if (
                 len(ids) != len(self.queue)
                 or len(set(ids)) != len(ids)

@@ -6,7 +6,7 @@ export const LIBRARY_MAX = 360
 
 function normalizeWidth(key: string, value: number, minimum: number, maximum: number) {
   const clamped = Math.max(minimum, Math.min(maximum, Math.round(value)))
-  return key === 'music-library-width' && clamped < LIBRARY_MIN ? LIBRARY_RAIL : clamped
+  return (key === 'music-library-width' || key.endsWith('-navigation-width')) && clamped < LIBRARY_MIN ? LIBRARY_RAIL : clamped
 }
 
 export function usePaneWidth(key: string, fallback: number, minimum: number, maximum: number) {
@@ -42,15 +42,15 @@ export function useSidebarCollapse() {
   return [collapsed, toggle] as const
 }
 
-export function MusicPaneDivider({ name, variable, target, value, minimum, maximum, direction = 1, onChange, className }: { name: string; variable: string; target: string; value: number; minimum: number; maximum: number; direction?: number; onChange: (value: number) => void; className: string }) {
+export function MusicPaneDivider({ name, variable, target, value, minimum, maximum, direction = 1, workspace = '.music-workspace', onChange, className }: { name: string; variable: string; target: string; value: number; minimum: number; maximum: number; direction?: number; workspace?: string; onChange: (value: number) => void; className: string }) {
   const gesture = useRef<{ x: number; initial: number; previous: string; next: number; collapsed: boolean; limit: number; host: HTMLElement; scopes: HTMLElement[]; frame?: number } | null>(null)
   const divider = useRef<HTMLDivElement>(null)
   const latest = useRef(onChange)
   latest.current = onChange
   const shell = () => document.querySelector<HTMLElement>('.app-shell')
   const bounds = () => {
-    const workspace = document.querySelector<HTMLElement>('.music-workspace')
-    const room = direction === 1 ? (workspace?.clientWidth || 800) - 330 : (document.querySelector('.main-shell')?.clientWidth || window.innerWidth) - 404
+    const area = document.querySelector<HTMLElement>(workspace)
+    const room = direction === 1 ? (area?.clientWidth || 800) - 330 : (document.querySelector('.main-shell')?.clientWidth || window.innerWidth) - 404
     return direction === 1 && room < LIBRARY_MIN ? LIBRARY_RAIL : Math.max(minimum, Math.min(maximum, room))
   }
   const current = () => document.querySelector(target)?.getBoundingClientRect().width || value
@@ -78,7 +78,7 @@ export function MusicPaneDivider({ name, variable, target, value, minimum, maxim
     if (!host) return
     event.preventDefault(); event.currentTarget.focus({ preventScroll: true }); event.currentTarget.setPointerCapture(event.pointerId)
     const initial = current()
-    const scopes = [...document.querySelectorAll<HTMLElement>(direction === 1 ? '.music-workspace' : '.main-shell main,.music-queue-sidebar')]
+    const scopes = [...document.querySelectorAll<HTMLElement>(direction === 1 ? workspace : '.main-shell main,.music-queue-sidebar')]
     gesture.current = { x: event.clientX, initial, previous: host.style.getPropertyValue(variable) || `${value}px`, next: initial, collapsed: initial < LIBRARY_MIN, limit: bounds(), host, scopes }
     document.body.classList.add('music-pane-resizing')
   }} onPointerMove={event => {

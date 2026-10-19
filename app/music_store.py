@@ -26,6 +26,18 @@ class MusicStore:
     def load_player(self) -> dict:
         return self.db.setting("music_player", {})
 
+    def saved_sources(self) -> dict:
+        result = {
+            (row["id"], ""): json.loads(row["tracks"]) for row in self.db.rows("SELECT id,tracks FROM music_playlists")
+        }
+        result.update(
+            {
+                ("liked", row["key"].split(":", 1)[1]): json.loads(row["value"]).get("tracks", [])
+                for row in self.db.rows("SELECT key,value FROM settings WHERE key LIKE 'music_likes:%'")
+            }
+        )
+        return result
+
     def save_player(self, value: dict) -> None:
         self.db.set_setting("music_player", value)
 
@@ -85,18 +97,13 @@ class MusicStore:
 
     def playlists(self, user_id: str, offset: int = 0, limit: int = 50, *, editable_by: dict | None = None) -> dict:
         restrict = int(editable_by is not None and not editable_by["admin"])
-        artwork = (
-            "jsonb_path_query_array(p.tracks::jsonb, '$[0 to 3].thumbnail')::text"
-            if isinstance(self.db.conn, Connection)
-            else "(SELECT json_group_array(json_extract(value, '$.thumbnail')) FROM json_each(p.tracks) WHERE key<4)"
-        )
         query = (
             "SELECT p.id,p.name,p.creator_id,p.collaborative,p.track_count,p.created_at,p.updated_at,"
             "{artwork} AS artwork,u.display_name AS creator_name "
             "FROM music_playlists p JOIN users u ON u.id=p.creator_id "
             "WHERE (?=0 OR p.creator_id=? OR p.collaborative=1) "
             "ORDER BY CASE WHEN p.creator_id=? THEN 0 ELSE 1 END,p.updated_at DESC,p.id LIMIT ? OFFSET ?"
-        ).replace("{artwork}", artwork)
+        ).replace("{artwork}", self.artwork_sql())
         rows = self.db.rows(
             query,
             (restrict, user_id, user_id, limit, offset),
@@ -110,6 +117,13 @@ class MusicStore:
             (restrict, user_id),
         )
         return {"playlists": rows, "total": count["total"], "offset": offset, "limit": limit}
+
+    def artwork_sql(self) -> str:
+        return (
+            "jsonb_path_query_array(p.tracks::jsonb, '$[0 to 3].thumbnail')::text"
+            if isinstance(self.db.conn, Connection)
+            else "(SELECT json_group_array(json_extract(value, '$.thumbnail')) FROM json_each(p.tracks) WHERE key<4)"
+        )
 
     @staticmethod
     def artwork(values: list) -> list[str]:
@@ -183,12 +197,16 @@ class MusicStore:
         pattern = "%" + query.lower().replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
         rows = self.db.rows(
             "SELECT p.id,p.name,p.creator_id,p.collaborative,p.track_count,p.updated_at,"
-            "u.display_name AS creator_name," + self.membership_sql() + " AS saved "
+            + self.artwork_sql()
+            + " AS artwork,u.display_name AS creator_name,"
+            + self.membership_sql()
+            + " AS saved "
             "FROM music_playlists p JOIN users u ON u.id=p.creator_id WHERE lower(p.name) LIKE ? ESCAPE '!' "
             "ORDER BY saved DESC,CASE WHEN p.creator_id=? THEN 0 ELSE 1 END,p.updated_at DESC,p.id LIMIT ? OFFSET ?",
             (*identity, pattern, user["id"], page[1], page[0]),
         )
         for row in rows:
+            row["artwork"] = self.artwork(json.loads(row["artwork"]))
             row["saved"] = bool(row["saved"])
             row["editable"] = bool(row["collaborative"] or self.owner(row, user))
         count = self.db.one(
@@ -276,7 +294,7 @@ class MusicStore:
 
     def track_for_edit(self, playlist_id: str, index: int, user: dict, expected_updated_at: float) -> dict:
         with self.db.lock, self.db.conn:
-            row = self.playlist(playlist_id)
+            row = self.liked(user) if playlist_id == "liked" else self.playlist(playlist_id)
             self.editable(row, user)
             if row["updated_at"] != expected_updated_at:
                 raise HTTPException(409, "This playlist changed. Refresh it before editing the song.")
@@ -287,8 +305,21 @@ class MusicStore:
     def update_track(self, playlist_id: str, index: int, user: dict, changes: dict) -> dict:
         with self.db.lock, self.db.conn:
             self.track_for_edit(playlist_id, index, user, changes["expected_updated_at"])
-            row = self.playlist(playlist_id)
+            row = self.liked(user) if playlist_id == "liked" else self.playlist(playlist_id)
             row["tracks"][index] = changes["track"]
+            if playlist_id == "liked":
+                identities = [(track["provider"], track["source_id"]) for track in row["tracks"]]
+                if len(set(identities)) != len(identities):
+                    raise HTTPException(409, "This recording is already in your Liked Songs.")
+                self.db.set_setting(
+                    "music_likes:" + user["id"],
+                    {
+                        "tracks": row["tracks"],
+                        "created_at": row["created_at"],
+                        "updated_at": max(time.time(), math.nextafter(row["updated_at"], math.inf)),
+                    },
+                )
+                return self.liked(user)
             return self.update(
                 playlist_id, user, {"tracks": row["tracks"], "expected_updated_at": changes["expected_updated_at"]}
             )

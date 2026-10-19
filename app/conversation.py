@@ -161,7 +161,7 @@ class Conversation:
             self.work.get_nowait()
         if session:
             await self.db.run(self.db.execute, "DELETE FROM conversations WHERE id=?", (session["id"],))
-            self.events.publish("conversation")
+            self.events.publish("conversation", {"scope": "conversation.status"})
 
     async def select_provider(self, provider: str) -> dict:
         async with self.model_lock:
@@ -187,7 +187,7 @@ class Conversation:
                 self.model_retry = 0
             finally:
                 self.switching_provider = False
-            self.events.publish("conversation")
+            self.events.publish("conversation", {"scope": "conversation.status"})
             return await self.check_model()
 
     async def select_model(self, name: str) -> dict:
@@ -211,7 +211,11 @@ class Conversation:
         async with self.model_lock:
             return await self.check_model()
 
-    async def check_model(self) -> dict:
+    async def inspect_model(self) -> dict:
+        async with self.model_lock:
+            return await self.check_model(synchronize=False)
+
+    async def check_model(self, *, synchronize: bool = True) -> dict:
         if self.deepgram:
             ready = bool(self.settings.deepgram_api_key)
             self.model_status = {
@@ -234,13 +238,20 @@ class Conversation:
                 response.raise_for_status()
                 status = await response.json()
             supported = status.get("models")
-            if supported and desired not in supported and status.get("ready"):
+            if synchronize and supported and desired not in supported and status.get("ready"):
                 desired = status["model"]
                 await self.db.run(self.db.set_setting, "transcription_model", desired)
-            if status.get("error") and status.get("ready") and status.get("model") != desired:
+                self.events.publish("conversation", {"scope": "transcription.settings"})
+            if synchronize and status.get("error") and status.get("ready") and status.get("model") != desired:
                 await self.db.run(self.db.set_setting, "transcription_model", status["model"])
+                self.events.publish("conversation", {"scope": "transcription.settings"})
                 desired = status["model"]
-            if status.get("model") != desired and status.get("ready") and time.monotonic() >= self.model_retry:
+            if (
+                synchronize
+                and status.get("model") != desired
+                and status.get("ready")
+                and time.monotonic() >= self.model_retry
+            ):
                 await self.close_session()
                 async with self.http.put(
                     self.settings.transcription_url + "/model", json={"model": desired}
@@ -362,7 +373,7 @@ class Conversation:
             return
         self.error = None
         await self.db.run(self.db.audit, None, "conversation.start", session["id"], session["channel_name"])
-        self.events.publish("conversation")
+        self.events.publish("conversation", {"scope": "conversation.status"})
 
     def update_participants(self, voice: VoiceRecvClient) -> None:
         members = {str(member.id) for member in voice.channel.members if not member.bot}
@@ -416,7 +427,7 @@ class Conversation:
                 state = json.dumps(self.snapshot(), sort_keys=True) if tick % 50 == 0 else self.last_status
                 if state != self.last_status:
                     self.last_status = state
-                    self.events.publish("conversation")
+                    self.events.publish("conversation", {"scope": "conversation.status"})
                 tick += 1
             except (discord.DiscordException, RuntimeError, ValueError, AttributeError, *DATABASE_ERRORS) as error:
                 log_failure("Conversation processing failed; capture stopped", error)
@@ -598,7 +609,7 @@ class Conversation:
             logging.getLogger("app.conversation").error(
                 "Delayed trigger action failed (%s)", type(task.exception()).__name__
             )
-            self.events.publish("conversation")
+            self.events.publish("conversation", {"scope": "conversation.status"})
 
     async def fire_delayed(self, trigger: dict, session_id: str, speech: Speech) -> None:
         await asyncio.sleep(trigger["delay"])

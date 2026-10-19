@@ -117,7 +117,7 @@ def test_admin_permissions_validation_search_protection_and_audit(client: TestCl
     assert client.get("/api/admin/permissions").status_code == 403
     add_user(client)
     client.app.state.auth.admin_ids.add("100")
-    assert all(client.get("/api/auth/me").json()["permissions"].values())
+    assert client.get("/api/auth/me").json()["permissions"] == effective_permissions({}, admin=True)
     endpoint = "/api/admin/users/200/permissions"
     for invalid in ({"unknown": True}, {"play_sounds": "false"}, {"play_sounds": 1}):
         assert client.put(endpoint, json={"overrides": invalid}, headers=headers(user)).status_code == 422
@@ -275,7 +275,7 @@ def test_delegated_admin_and_protected_self_permissions(client: TestClient) -> N
     assert result.json()["permissions"]["admin"]
     assert not client.get("/api/auth/me").json()["permissions"]["play_sounds"]
     assert client.put(target, json={"overrides": {"admin": False}}, headers=headers(user)).status_code == 409
-    assert all(client.delete(target, headers=headers(user)).json()["permissions"].values())
+    assert client.delete(target, headers=headers(user)).json()["permissions"] == effective_permissions({}, admin=True)
     client.app.state.auth.admin_ids.remove("100")
     assert client.get("/api/admin/permissions").status_code == 403
 
@@ -322,7 +322,7 @@ def test_playback_requires_voice_presence_or_explicit_permission(
     present, outside, play, status = scenario
     user = login(client)
     seed(client.app.state.db)
-    override(client, {"play_outside_voice": outside, "play_sounds": play})
+    override(client, {"outside_voice_control": outside, "play_sounds": play})
     channel = SimpleNamespace(members=[SimpleNamespace(id=100)] if present else [])
     state = SimpleNamespace(
         voice=SimpleNamespace(channel=channel, is_connected=lambda: True),
@@ -337,7 +337,7 @@ def test_playback_requires_voice_presence_or_explicit_permission(
     assert response.status_code == status
     assert state.play.call_count == int(status == 201)
     assert client.get("/api/auth/me").status_code == 200
-    assert not DEFAULTS["play_outside_voice"]
+    assert not DEFAULTS["outside_voice_control"]
 
 
 def test_channel_import_defaults_require_an_explicit_grant() -> None:
@@ -375,3 +375,23 @@ def test_long_sound_permission_is_default_off() -> None:
     assert effective_permissions({})["long_sounds"] is False
     assert effective_permissions({"long_sounds": True})["long_sounds"] is True
     assert effective_permissions({"long_sounds": False}, admin=True)["long_sounds"] is False
+
+
+def test_outside_voice_permission_is_default_off_including_protected_admins(client: TestClient) -> None:
+    user = login(client)
+    client.app.state.auth.admin_ids.add("100")
+    catalogue = client.get("/api/admin/permissions").json()
+    assert catalogue["defaults"]["outside_voice_control"] is False
+    assert catalogue["admin_defaults"]["outside_voice_control"] is False
+    assert not client.get("/api/auth/me").json()["permissions"]["outside_voice_control"]
+    target = "/api/admin/users/100/permissions"
+    result = client.put(target, json={"overrides": {"outside_voice_control": True}}, headers=headers(user))
+    assert result.status_code == 200
+    assert result.json()["overrides"] == {"outside_voice_control": True}
+    assert client.get("/api/auth/me").json()["permissions"]["outside_voice_control"] is True
+    result = client.delete(target, headers=headers(user))
+    assert result.json()["permissions"]["outside_voice_control"] is False
+    assert result.json()["permissions"]["admin"] is True
+    keys = {item["id"] for item in catalogue["permissions"]}
+    assert "outside_voice_control" in keys
+    assert not {"always_live_conversation", "play_outside_voice"} & keys

@@ -948,11 +948,11 @@ def test_live_transcript_presence_and_permission(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, *, present: bool, override: bool, allowed: bool
 ) -> None:
     user = login(client)
-    assert user["permissions"]["always_live_conversation"] is False
+    assert user["permissions"]["outside_voice_control"] is False
     db = client.app.state.db
     db.execute(
         "UPDATE users SET permission_overrides=? WHERE id='100'",
-        (json.dumps({"view_conversations": True, "always_live_conversation": override}),),
+        (json.dumps({"view_conversations": True, "outside_voice_control": override}),),
     )
     db.execute("INSERT INTO conversations(id,channel_id,channel_name,started_at) VALUES ('live','123','Voice',1)")
     client.app.state.conversation.session = {
@@ -968,12 +968,12 @@ def test_live_transcript_presence_and_permission(
     assert client.get("/api/conversations/live/messages").status_code == (200 if allowed else 403)
     db.execute(
         "UPDATE users SET permission_overrides=? WHERE id='100'",
-        ('{"view_conversations":false,"always_live_conversation":true}',),
+        ('{"view_conversations":false,"outside_voice_control":true}',),
     )
     assert client.get("/api/conversations/live/messages").status_code == 403
     db.execute(
         "UPDATE users SET permission_overrides=? WHERE id='100'",
-        ('{"view_conversations":true,"always_live_conversation":false}',),
+        ('{"view_conversations":true,"outside_voice_control":false}',),
     )
     monkeypatch.setattr(type(client.app.state.bot), "voice", property(lambda _self: None))
     assert client.get("/api/conversations/live/messages").status_code == 403
@@ -994,7 +994,7 @@ def test_incremental_messages_include_late_speech_and_recheck_permissions(client
     db = client.app.state.db
     db.execute(
         "UPDATE users SET permission_overrides=? WHERE id='100'",
-        ('{"view_conversations":true,"always_live_conversation":true}',),
+        ('{"view_conversations":true,"outside_voice_control":true}',),
     )
     db.execute("INSERT INTO conversations(id,channel_id,channel_name,started_at) VALUES ('delta','123','Voice',1)")
     client.app.state.conversation.session = db.one("SELECT * FROM conversations WHERE id='delta'")
@@ -1091,7 +1091,7 @@ def test_interim_api_rechecks_live_transcript_permissions(client: TestClient) ->
     db = client.app.state.db
     db.execute(
         "UPDATE users SET permission_overrides=? WHERE id='100'",
-        ('{"view_conversations":true,"always_live_conversation":true}',),
+        ('{"view_conversations":true,"outside_voice_control":true}',),
     )
     db.execute("INSERT INTO conversations(id,channel_id,channel_name,started_at) VALUES ('partial','123','Voice',1)")
     value = client.app.state.conversation

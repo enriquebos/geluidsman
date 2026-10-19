@@ -1,0 +1,84 @@
+.soundboard-page-view{height:100dvh;min-height:0;overflow:clip;overscroll-behavior:none}
+.soundboard-page-view .main-shell{height:100dvh;display:flex;flex-direction:column;overflow:clip;overscroll-behavior:none}
+.soundboard-page-view .topbar{flex-shrink:0;overscroll-behavior:none}
+.soundboard-page-view .main-shell main{flex:1;min-height:0;width:100%;max-width:none;margin:0;padding:12px 12px calc(var(--music-player-height,80px) + 12px);display:flex;flex-direction:column;overflow:clip;container:soundboard-shell / inline-size}
+.soundboard-page-view.music-queue-open main{width:auto;margin-right:0;padding-right:calc(var(--music-queue-width) + 24px)}
+.soundboard-workspace{--soundboard-navigation-size:var(--soundboard-navigation-width,240px);position:relative;display:grid;grid-template-columns:var(--soundboard-navigation-size) minmax(0,1fr);grid-template-rows:minmax(0,1fr);gap:12px;flex:1;min-height:0;min-width:0}
+.soundboard-navigation-pane,.soundboard-main-pane{min-width:0;min-height:0;background:#17141d;border:1px solid #302936;border-radius:12px;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#a699b333 transparent}
+.soundboard-navigation-pane{padding:16px 7px;overflow-y:auto;container:soundboard-navigation / inline-size}
+.soundboard-navigation-heading{display:flex;align-items:center;justify-content:space-between;gap:6px;margin:0 7px 18px}
+.soundboard-navigation-heading h2{font-size:16px;white-space:nowrap}
+.soundboard-navigation-heading .icon-button{flex-shrink:0}
+.soundboard-navigation-pane .section-navigation{flex-direction:column;align-items:stretch;gap:6px;margin:0;border:0;overflow:visible}
+.soundboard-navigation-pane .section-navigation-item{width:100%;min-height:45px;justify-content:flex-start;gap:10px;padding:11px 10px;border:1px solid transparent;border-radius:8px;font-size:13px;text-align:left}
+.soundboard-navigation-pane .section-navigation-item.active{background:#7962b426;border-color:#514160;color:#d5c5fc}
+.soundboard-navigation-pane .section-navigation-count,.soundboard-navigation-pane .nav-beta{margin-left:auto;flex-shrink:0}
+.soundboard-navigation-pane .section-navigation-label{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.soundboard-navigation-divider{left:var(--soundboard-navigation-size)}
+.soundboard-main-pane{overflow-y:auto;padding:24px;container:soundboard-content / inline-size}
+.soundboard-main-pane::-webkit-scrollbar,.soundboard-navigation-pane::-webkit-scrollbar{width:5px}
+.soundboard-main-pane::-webkit-scrollbar-track,.soundboard-navigation-pane::-webkit-scrollbar-track{background:transparent}
+.soundboard-main-pane::-webkit-scrollbar-thumb,.soundboard-navigation-pane::-webkit-scrollbar-thumb{background:#a699b333;border-radius:6px}
+.soundboard-main-pane::-webkit-scrollbar-thumb:hover,.soundboard-navigation-pane::-webkit-scrollbar-thumb:hover{background:#a699b366}
+.soundboard-main-pane .page-heading{gap:16px;margin-bottom:20px}
+.soundboard-main-pane .page-heading .eyebrow{display:none}
+.soundboard-main-pane .page-heading h1{font-size:30px;line-height:1.25;letter-spacing:-1px;margin:0 0 8px}
+.soundboard-main-pane .page-heading p{font-size:13px}
+.soundboard-main-pane .page-heading>div{min-width:0}
+.soundboard-main-pane .page-heading>.primary-button{flex-shrink:0}
+.soundboard-main-pane .notice{font-size:13px;padding:12px 14px;margin-bottom:18px}
+.soundboard-main-pane .board-toolbar{margin-top:0;gap:12px;flex-wrap:wrap;padding-bottom:12px;min-height:48px}
+.soundboard-main-pane .soundboard-count{font-size:13px;white-space:nowrap}
+.soundboard-main-pane .soundboard-search-tools{gap:10px;min-width:0;flex:1;justify-content:flex-end}
+.soundboard-main-pane .soundboard-mode{flex-shrink:0;white-space:nowrap}
+.soundboard-main-pane .soundboard-mode button{font-size:13px;padding:8px 10px}
+.soundboard-main-pane .creator-filter{width:180px;min-width:0;flex:0 1 180px}
+.soundboard-main-pane .search{min-width:0;max-width:100%;width:240px;flex:0 1 240px}
+.soundboard-main-pane .search input{width:100%;min-width:0;flex:1}
+.soundboard-main-pane .board-controls{gap:12px;padding:16px 0 22px;align-items:flex-start;flex-wrap:wrap}
+.soundboard-main-pane .tag-list{min-width:0;gap:6px}
+.soundboard-main-pane .tag{padding:6px 10px;font-size:12px}
+.soundboard-main-pane .play-hint{font-size:11px;margin-left:auto}
+.soundboard-main-pane .sound-category-toggle{margin-bottom:12px}
+.soundboard-main-pane .sound-grid{grid-template-columns:repeat(auto-fill,minmax(min(180px,100%),1fr));gap:12px}
+.soundboard-main-pane .compact-sound-grid{grid-template-columns:repeat(auto-fill,minmax(min(160px,100%),1fr));gap:10px}
+.soundboard-main-pane .video-grid{grid-template-columns:repeat(auto-fill,minmax(min(230px,100%),1fr))}
+.soundboard-page-view:has(.conversation-widget) .soundboard-main-pane{padding-bottom:88px;scroll-padding-bottom:88px}
+.soundboard-page-view .conversation-widget{bottom:calc(var(--music-player-height,80px) + 24px)}
+.music-pane-resizing .soundboard-main-pane,.music-pane-resizing .soundboard-navigation-pane{scroll-behavior:auto}
+.sidebar:not(:has(.sidebar-members)) .sidebar-collapse{margin-top:auto}
+.sidebar:not(:has(.sidebar-members)) .sidebar-bottom{margin-top:0}
+@container soundboard-navigation (max-width:180px){
+  .soundboard-navigation-heading{justify-content:center;margin:0 0 12px}
+  .soundboard-navigation-heading h2,.soundboard-navigation-pane .section-navigation-label,.soundboard-navigation-pane .section-navigation-count,.soundboard-navigation-pane .nav-beta{display:none}
+  .soundboard-navigation-pane .section-navigation-item{justify-content:center;padding:12px 5px;gap:0}
+}
+@container soundboard-shell (max-width:650px){
+  .soundboard-workspace{--soundboard-navigation-size:64px}
+  .soundboard-navigation-divider,.soundboard-navigation-heading{display:none}
+}
+@container soundboard-content (max-width:760px){
+  .soundboard-main-pane .soundboard-search-tools{flex-wrap:wrap;width:100%;flex-basis:100%;justify-content:flex-start}
+  .soundboard-main-pane .soundboard-mode>span{display:none}
+  .soundboard-main-pane .creator-filter{flex:1 1 140px}
+  .soundboard-main-pane .soundboard-search-tools>.search{flex:1 1 180px;width:auto}
+  .soundboard-main-pane .page-heading h1{font-size:26px}
+  .soundboard-main-pane .play-hint{display:none}
+}
+@container soundboard-content (max-width:400px){
+  .soundboard-main-pane .page-heading{flex-wrap:wrap}
+  .soundboard-main-pane .page-heading h1{font-size:24px}
+  .soundboard-main-pane .soundboard-mode{width:100%;justify-content:flex-start}
+  .soundboard-main-pane .search{flex-basis:100%;width:100%}
+  .soundboard-main-pane .board-toolbar>.search{max-width:none}
+  .soundboard-main-pane .board-controls{padding-bottom:18px}
+  .soundboard-main-pane .import-panel-heading{flex-wrap:wrap}
+}
+@media(max-width:600px){
+  .soundboard-page-view .main-shell{height:calc(100dvh - 65px)}
+  .soundboard-page-view .main-shell main{padding:8px 8px calc(var(--music-player-height,90px) + 8px)}
+  .soundboard-page-view.music-queue-open main{padding-right:8px}
+  .soundboard-workspace{gap:8px}
+  .soundboard-main-pane{padding:16px 12px}
+  .soundboard-navigation-pane{padding:8px 5px}
+}

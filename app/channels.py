@@ -177,22 +177,25 @@ class ChannelImports:
             self.media.operation.reset(operation_token)
             self.media.busy = False
 
-    async def import_items(self, batch_id: str) -> None:
+    async def cancel_item(self, identity: int) -> None:
         media = self.media
-        known = {video_id(item["url"]) for item in (await media.db.run(media.db.sources))}
-        items = await media.db.run(
-            media.db.rows, "SELECT * FROM channel_items WHERE batch_id=? AND status='queued' ORDER BY id", (batch_id,)
-        )
-        for item in items:
-            if video_id(item["url"]) in known:
+        async with media.download_lock:
+            item = await media.db.run(media.db.one, "SELECT status,job_id FROM channel_items WHERE id=?", (identity,))
+            if item and item["status"] == "queued":
                 await media.db.run(
-                    media.db.execute, "UPDATE channel_items SET status='skipped' WHERE id=?", (item["id"],)
+                    media.db.execute, "UPDATE channel_items SET status='cancelled' WHERE id=?", (identity,)
                 )
                 media.events.publish("jobs")
-                continue
-            if media.used_bytes() >= media.settings.max_storage_bytes:
-                await self.update(batch_id, "paused", "Storage is full. Free space and resume this channel.")
                 return
+        if item and item["status"] == "importing" and item["job_id"]:
+            await media.cancel_job(item["job_id"])
+
+    async def start_item(self, batch_id: str, item: dict) -> tuple | None:
+        media = self.media
+        async with media.download_lock:
+            current = await media.db.run(media.db.one, "SELECT status FROM channel_items WHERE id=?", (item["id"],))
+            if not current or current["status"] != "queued":
+                return None
             batch = await media.db.run(media.db.one, "SELECT actor_id FROM channel_batches WHERE id=?", (batch_id,))
             job_id = await media.db.run(media.db.add_job, item["url"], batch["actor_id"])
             await media.db.run(
@@ -204,10 +207,47 @@ class ChannelImports:
                 (job_id, item["id"]),
             )
             media.events.publish("jobs")
-            await media.import_job(job_id, item["url"])
+            task = asyncio.create_task(media.import_job(job_id, item["url"]))
+            media.job_tasks[job_id] = task
+            return job_id, task
+
+    async def import_items(self, batch_id: str) -> None:
+        media = self.media
+        known = {video_id(item["url"]) for item in (await media.db.run(media.db.sources))}
+        items = await media.db.run(
+            media.db.rows, "SELECT * FROM channel_items WHERE batch_id=? AND status='queued' ORDER BY id", (batch_id,)
+        )
+        for item in items:
+            current = await media.db.run(media.db.one, "SELECT status FROM channel_items WHERE id=?", (item["id"],))
+            if not current or current["status"] != "queued":
+                continue
+            if video_id(item["url"]) in known:
+                await media.db.run(
+                    media.db.execute, "UPDATE channel_items SET status='skipped' WHERE id=?", (item["id"],)
+                )
+                media.events.publish("jobs")
+                continue
+            if (
+                (media.budget.used() >= media.budget.limit)
+                if media.budget
+                else (media.used_bytes() >= media.settings.max_storage_bytes)
+            ):
+                await self.update(batch_id, "paused", "Storage is full. Free space and resume this channel.")
+                return
+            started = await self.start_item(batch_id, item)
+            if not started:
+                continue
+            job_id, task = started
+            try:
+                await task
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
+            finally:
+                media.job_tasks.pop(job_id, None)
             media.busy = True
             job = await media.db.run(media.db.one, "SELECT status FROM jobs WHERE id=?", (job_id,))
-            status = "complete" if job["status"] == "complete" else "failed"
+            status = job["status"] if job["status"] in ("complete", "cancelled") else "failed"
             await media.db.run(media.db.execute, "UPDATE channel_items SET status=? WHERE id=?", (status, item["id"]))
             if status == "complete":
                 known.add(video_id(item["url"]))

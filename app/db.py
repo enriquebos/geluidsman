@@ -180,6 +180,12 @@ class Database:
     ) -> None:
         with self.lock, self.conn:
             self.insert_audit(actor_id, action, resource_id, name, outcome=outcome, guild_id=guild_id, details=details)
+            if action == "sound.play" and resource_id and outcome == "success":
+                self.conn.execute(
+                    "INSERT INTO media_usage(resource_id,last_used) VALUES (?,?) "
+                    "ON CONFLICT(resource_id) DO UPDATE SET last_used=excluded.last_used",
+                    ("sound:" + resource_id, time.time()),
+                )
 
     def change(
         self,
@@ -225,7 +231,7 @@ class Database:
             self.conn.execute(
                 "INSERT INTO sources (id,url,title,duration,created_at,media_id,importer_id) VALUES (?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET title=excluded.title,duration=excluded.duration,"
-                "media_id=excluded.media_id",
+                "media_id=excluded.media_id,media_available=1",
                 (
                     source_id,
                     source["url"],

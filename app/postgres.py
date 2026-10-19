@@ -36,6 +36,8 @@ class Cursor:
 
 class Connection:
     def __init__(self, url: str) -> None:
+        self.url = url
+        self.closed = False
         for attempt in range(CONNECT_ATTEMPTS):
             try:
                 self.raw = psycopg.connect(url, autocommit=True, row_factory=dict_row, connect_timeout=CONNECT_TIMEOUT)
@@ -52,7 +54,26 @@ class Connection:
                 break
         self.transactions = []
 
+    def ensure_connection(self) -> None:
+        if self.closed:
+            message = "The database connection is closed."
+            raise psycopg.InterfaceError(message)
+        if not self.raw.closed:
+            return
+        if self.transactions:
+            message = "The database connection was lost during a transaction."
+            raise psycopg.OperationalError(message)
+        raw = psycopg.connect(self.url, autocommit=True, row_factory=dict_row, connect_timeout=CONNECT_TIMEOUT)
+        try:
+            raw.execute("SET pg_trgm.word_similarity_threshold=0.3")
+        except BaseException:
+            raw.close()
+            raise
+        self.raw = raw
+        logger.info("PostgreSQL connection restored")
+
     def __enter__(self) -> Self:
+        self.ensure_connection()
         transaction = self.raw.transaction()
         transaction.__enter__()
         self.transactions.append(transaction)
@@ -62,6 +83,7 @@ class Connection:
         self.transactions.pop().__exit__(*args)
 
     def execute(self, query: str, args: SQLParameters = ()) -> Cursor:
+        self.ensure_connection()
         values = list(args)
         query = re.sub(r'(?<![\w"])end(?![\w"])', '"end"', query)
         query = re.sub(r"(\w+(?:\.\w+)?) COLLATE NOCASE", r"lower(\1)", query)
@@ -86,6 +108,7 @@ class Connection:
         return Cursor(cursor, inserted["id"] if inserted else None)
 
     def executemany(self, query: str, values: Sequence[SQLParameters]) -> None:
+        self.ensure_connection()
         query = re.sub(r'(?<![\w"])end(?![\w"])', '"end"', query)
         if query.startswith("INSERT OR IGNORE"):
             query = query.replace("INSERT OR IGNORE", "INSERT", 1) + " ON CONFLICT DO NOTHING"
@@ -94,6 +117,7 @@ class Connection:
             cursor.executemany(query, values)
 
     def executescript(self, query: str) -> None:
+        self.ensure_connection()
         self.raw.execute(query)
 
     def initialize(self) -> None:
@@ -102,4 +126,5 @@ class Connection:
         self.raw.execute("SET pg_trgm.word_similarity_threshold=0.3")
 
     def close(self) -> None:
+        self.closed = True
         self.raw.close()

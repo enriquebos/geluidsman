@@ -1,0 +1,40 @@
+.music-playlist-error{display:flex;align-items:center;flex-wrap:wrap;gap:8px 18px;margin:16px 0;color:#f0a7b6;font-size:13px}
+.music-playlist-error>span{min-width:0;overflow-wrap:anywhere}
+.music-playlist-error>button{flex-shrink:0}
+.music-playlist-skeleton{pointer-events:none;user-select:none}
+.music-main-pane .music-skeleton-row:hover{background:transparent}
+.music-skeleton-block{display:block;background:var(--border);border-radius:4px;animation:music-skeleton-pulse 1.8s ease-in-out infinite alternate}
+.music-main-pane .music-skeleton-row>.music-track-text{gap:8px}
+.music-main-pane .music-skeleton-title{width:65%;height:12px}
+.music-main-pane .music-skeleton-artist{width:42%;height:9px}
+.music-skeleton-duration{width:30px;height:10px;flex-shrink:0}
+.music-skeleton-action{width:28px;flex-shrink:0}
+@keyframes music-skeleton-pulse{from{opacity:.45}to{opacity:.7}}
+@media(prefers-reduced-motion:reduce){.music-skeleton-block{animation:none;opacity:.6}}
+
+.music-validation-frame{position:relative;display:flow-root;min-width:0}
+.music-validation-frame.has-content>.music-validation-placeholder{position:absolute;inset:0;overflow:hidden}
+.music-validation-placeholder{pointer-events:none;user-select:none}
+.music-placeholder-decoration{visibility:hidden}
+.music-placeholder-decoration.visible{visibility:visible}
+.music-validation-frame.has-content>.music-validation-placeholder,.music-validation-frame.has-content>.music-validation-placeholder>.music-placeholder-decoration{height:100%}
+.music-hero-skeleton{height:100%;box-sizing:border-box}
+.music-hero-skeleton>div{flex:1}
+.music-hero-skeleton .music-kicker{width:min(120px,70%)}
+.music-hero-skeleton h1>span{width:min(420px,90%)}
+.music-hero-skeleton p>.music-skeleton-block{display:inline-block;width:min(105px,40%)}
+.music-hero-skeleton p>span.music-skeleton-block{width:min(135px,45%);margin-left:6px}
+.music-hero-skeleton small{width:min(350px,95%)}
+.music-library-list .music-confirmed-body,.music-library-skeleton{display:flex;flex-direction:column;gap:4px}
+.music-library-skeleton .music-library-item>span:not(.music-playlist-artwork){flex:1}
+.music-library-skeleton strong{width:90%}
+.music-library-skeleton small{width:58%}
+.music-library-skeleton small:last-child{width:42%}
+.music-skeleton-number{width:12px;height:12px;margin-left:8px}
+.music-count-placeholder{display:inline-block;width:42px;height:10px;border-radius:3px;animation:music-count-reveal 0s 180ms forwards}
+.music-empty-skeleton>span{width:28px;height:28px}
+.music-empty-skeleton>h2{width:min(180px,80%)}
+.music-empty-skeleton>p{width:min(360px,90%)}
+@keyframes music-count-reveal{to{background:var(--border)}}
+@media(max-width:600px){.music-hero-skeleton p>span.music-skeleton-block{display:block;width:85%;margin-left:0}.music-hero-skeleton p>strong.music-skeleton-block{width:45%}}
+.music-main-pane,.music-library-list{overflow-anchor:none}

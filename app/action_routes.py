@@ -97,9 +97,13 @@ def register_action_routes(app: FastAPI) -> None:
             name=EVENTS[body.event],
             details={**body.model_dump(), "event_label": EVENTS[body.event]},
         )
-        app.state.events.publish("actions")
+        with app.state.db.lock:
+            value = rules()
+            app.state.events.publish(
+                "actions", {"scope": "actions.rules", "resource": "/actions/triggers", "value": value}
+            )
         app.state.events.publish("audit")
-        return {"id": rule_id}
+        return {"id": rule_id, **value}
 
     @app.put(
         "/api/actions/triggers/{rule_id}", dependencies=[Depends(require_permission("view_actions", "manage_actions"))]
@@ -128,9 +132,13 @@ def register_action_routes(app: FastAPI) -> None:
             name=EVENTS[body.event],
             details={**body.model_dump(), "event_label": EVENTS[body.event]},
         )
-        app.state.events.publish("actions")
+        with app.state.db.lock:
+            value = rules()
+            app.state.events.publish(
+                "actions", {"scope": "actions.rules", "resource": "/actions/triggers", "value": value}
+            )
         app.state.events.publish("audit")
-        return {"ok": True}
+        return {"ok": True, **value}
 
     @app.delete(
         "/api/actions/triggers/{rule_id}", dependencies=[Depends(require_permission("view_actions", "manage_actions"))]
@@ -150,6 +158,10 @@ def register_action_routes(app: FastAPI) -> None:
             name=EVENTS[rule["event"]],
             details={"event": rule["event"], "event_label": EVENTS[rule["event"]]},
         )
-        app.state.events.publish("actions")
+        with app.state.db.lock:
+            value = rules()
+            app.state.events.publish(
+                "actions", {"scope": "actions.rules", "resource": "/actions/triggers", "value": value}
+            )
         app.state.events.publish("audit")
-        return {"ok": True}
+        return {"ok": True, **value}

@@ -20,6 +20,8 @@ class MusicTrack(BaseModel):
     youtube_id: str | None = Field(default=None, pattern=r"^[\w-]{11}$")
     youtube_title: str | None = Field(default=None, max_length=300)
     original_title: str | None = Field(default=None, max_length=300)
+    upload_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    upload_name: str | None = Field(default=None, max_length=255)
     match_locked: StrictBool = False
 
     @model_validator(mode="after")
@@ -42,11 +44,20 @@ class MusicTrack(BaseModel):
         return self
 
 
+class MusicSavedOrigin(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    playlist_id: str = Field(min_length=1, max_length=64)
+    index: int = Field(ge=0, lt=1000)
+    expected_updated_at: float = Field(gt=0, allow_inf_nan=False)
+
+
 class MusicTracksInput(BaseModel):
+    saved_origin: MusicSavedOrigin | None = None
     tracks: list[MusicTrack] = Field(min_length=1, max_length=1000)
 
 
 class MusicTrackInput(BaseModel):
+    saved_origin: MusicSavedOrigin | None = None
     track: MusicTrack
 
 

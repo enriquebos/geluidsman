@@ -15,11 +15,12 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import anyio
 import numpy as np
 
 from app.audio_processing import MediaError, normalize_sound, process
 from app.captions import parse
-from app.channels import ChannelImports
+from app.channels import ChannelImports, video_id
 from app.db import DATABASE_ERRORS, Database, new_id
 from app.network import DownloadProxy, public_addresses, validate_url
 from app.storage import Storage, size
@@ -45,10 +46,14 @@ class Media:
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = asyncio.Lock()
         self.summary_lock = asyncio.Lock()
+        self.download_lock = asyncio.Lock()
         self.summary_until = 0.0
         self.summary_cache = {}
         self.tasks = set()
         self.busy = False
+        self.budget = None
+        self.job_tasks = {}
+        self.cancelled_jobs = set()
         self.channels = ChannelImports(self)
         self.clean_orphans()
         self.storage = Storage(self.root)
@@ -65,11 +70,22 @@ class Media:
 
     @asynccontextmanager
     async def configured_operation(self) -> AsyncIterator[None]:
-        token = self.operation.set(await self.db.run(lambda: self.settings))
+        snapshot = await self.db.run(lambda: self.settings)
+        reservation = new_id()
+        if self.budget:
+            amount = await asyncio.to_thread(self.budget.reserve, reservation, snapshot.max_import_bytes * 3)
+            if not amount:
+                message = "Media storage is full. Free space in Storage or increase the media limit."
+                raise MediaError(message)
+            snapshot = snapshot.model_copy(update={"max_storage_bytes": self.used_bytes() + amount})
+        token = self.operation.set(snapshot)
         try:
             yield
         finally:
             self.operation.reset(token)
+            if self.budget:
+                self.budget.release(reservation)
+                self.budget.cache.refresh()
 
     def clean_orphans(self) -> None:
         ids = {x["media_id"] or x["id"] for x in self.db.sources()} | {x["id"] for x in self.db.clips()}
@@ -105,10 +121,10 @@ class Media:
             await task
         self.summary_until = 0
 
-    async def summary(self) -> dict:
+    async def summary(self, *, fresh: bool = False) -> dict:
         await self.reconcile_storage()
         async with self.summary_lock:
-            if time.monotonic() >= self.summary_until:
+            if fresh or time.monotonic() >= self.summary_until:
                 used_bytes, dependencies = await asyncio.gather(
                     asyncio.to_thread(self.used_bytes), asyncio.to_thread(self.dependencies)
                 )
@@ -157,6 +173,10 @@ class Media:
 
     async def import_url(self, url: str, source_id: str | None = None, actor_id: str | None = None) -> str:
         validate_url(url)
+        if source_id is None:
+            existing = await self.db.run(self.existing_import, url)
+            if existing:
+                return existing
         await self.ensure_import_available()
         try:
             job_id = await self.db.run(self.db.add_job, url, actor_id)
@@ -172,6 +192,10 @@ class Media:
                 await self.db.run(self.db.execute, "UPDATE jobs SET source_id=? WHERE id=?", (source_id, job_id))
             task = asyncio.create_task(self.import_job(job_id, url, source_id))
             self.tasks.add(task)
+            self.job_tasks[job_id] = task
+            task.add_done_callback(
+                lambda done: self.job_tasks.pop(job_id, None) if self.job_tasks.get(job_id) is done else None
+            )
             task.add_done_callback(self.tasks.discard)
             self.events.publish("jobs")
         except BaseException:
@@ -179,6 +203,73 @@ class Media:
             raise
         else:
             return job_id
+
+    async def retry_jobs(self, jobs: list[dict], actor_id: str) -> None:
+        if not jobs:
+            return
+        await self.ensure_import_available()
+        try:
+            queued = await self.db.run(self.queue_retries, jobs, actor_id)
+            task = asyncio.create_task(self.run_retries(queued))
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
+            self.events.publish("jobs")
+        except BaseException:
+            self.busy = False
+            raise
+
+    def queue_retries(self, jobs: list[dict], actor_id: str) -> list[str]:
+        result = []
+        with self.db.lock, self.db.conn:
+            for job in jobs:
+                identity = self.db.add_job(job["url"], actor_id)
+                self.db.conn.execute("UPDATE jobs SET source_id=? WHERE id=?", (job.get("source_id"), identity))
+                result.append(identity)
+        return result
+
+    async def run_retries(self, queued: list[str]) -> None:
+        try:
+            for identity in queued:
+                async with self.download_lock:
+                    job = await self.db.run(self.db.one, "SELECT * FROM jobs WHERE id=?", (identity,))
+                    if job["status"] != "queued":
+                        continue
+                    task = asyncio.create_task(self.import_job(identity, job["url"], job["source_id"]))
+                    self.job_tasks[identity] = task
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    if asyncio.current_task().cancelling():
+                        raise
+                finally:
+                    self.job_tasks.pop(identity, None)
+                    self.busy = True
+        finally:
+            self.busy = False
+            self.events.publish("jobs")
+
+    def existing_import(self, url: str) -> str | None:
+        identity = video_id(url) or url
+        for job in self.db.rows("SELECT id,url FROM jobs WHERE status IN ('queued','downloading','processing')"):
+            if (video_id(job["url"]) or job["url"]) == identity:
+                return job["id"]
+        for source in self.db.sources():
+            if (video_id(source["url"]) or source["url"]) != identity or not source.get("media_available", 1):
+                continue
+            if not (self.root / (source["media_id"] or source["id"]) / "video.mp4").is_file():
+                continue
+            existing = self.db.one(
+                "SELECT id FROM jobs WHERE source_id=? AND status='complete' ORDER BY created_at DESC LIMIT 1",
+                (source["id"],),
+            )
+            if existing:
+                return existing["id"]
+            job_id = self.db.add_job(url)
+            self.db.execute(
+                "UPDATE jobs SET status='complete',progress=1,source_id=? WHERE id=?", (source["id"], job_id)
+            )
+            return job_id
+        return None
 
     async def ensure_import_available(self) -> None:
         if self.busy:
@@ -189,7 +280,11 @@ class Media:
             raise MediaError("Missing media dependencies: " + ", ".join(dependencies))
         settings = await self.db.run(lambda: self.settings)
         await self.reconcile_storage()
-        if self.used_bytes() >= settings.max_storage_bytes:
+        if (
+            (self.budget.used() >= self.budget.limit)
+            if self.budget
+            else (self.used_bytes() >= settings.max_storage_bytes)
+        ):
             msg = "Media storage is full. Delete unused sources or sounds."
             raise MediaError(msg)
 
@@ -268,11 +363,9 @@ class Media:
                     if previous:
                         await asyncio.to_thread(self.storage.remove, self.root / (previous["media_id"] or source_id))
                     await self.notify_job(job_id, "complete", 1, source_id=source_id)
-                    self.events.publish("library")
+                    self.events.publish("library", {"scope": "sources", "ids": [source_id]})
         except asyncio.CancelledError:
-            await self.notify_job(job_id, "interrupted", error="Import interrupted. Retry to start again.")
-            if folder is not None and not committed:
-                await asyncio.to_thread(self.storage.remove, folder)
+            await self.interrupt_import(job_id, folder, source_id, committed=committed)
             raise
         except (ValueError, OSError, TimeoutError, *DATABASE_ERRORS) as exc:
             await self.report_import_error(job_id, exc)
@@ -280,6 +373,42 @@ class Media:
                 await asyncio.to_thread(self.storage.remove, folder)
         finally:
             self.busy = False
+            self.cancelled_jobs.discard(job_id)
+
+    async def interrupt_import(
+        self, job_id: str, folder: Path | None, source_id: str | None, *, committed: bool
+    ) -> None:
+        if committed:
+            await self.notify_job(job_id, "complete", 1, source_id=source_id)
+            self.events.publish("library", {"scope": "sources", "ids": [source_id]})
+            return
+        await self.notify_job(
+            job_id,
+            "cancelled" if job_id in self.cancelled_jobs else "interrupted",
+            error="Download cancelled. Retry to start again."
+            if job_id in self.cancelled_jobs
+            else "Import interrupted. Retry to start again.",
+        )
+        if folder is not None:
+            await asyncio.to_thread(self.storage.remove, folder)
+
+    async def cancel_job(self, job_id: str) -> None:
+        async with self.download_lock:
+            task = self.job_tasks.get(job_id)
+            if not task:
+                await self.db.run(
+                    self.db.execute,
+                    "UPDATE jobs SET status='cancelled',error='Download cancelled' WHERE id=? AND status='queued'",
+                    (job_id,),
+                )
+                self.events.publish("jobs")
+                return
+            if task.done():
+                message = "This download has already finished. Refresh Downloads."
+                raise MediaError(message)
+            self.cancelled_jobs.add(job_id)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def report_import_error(self, job_id: str, exc: Exception) -> None:
         logging.getLogger("app.media").error("Video import failed for job %s", job_id, exc_info=exc)
@@ -358,6 +487,16 @@ class Media:
             if "progress" in data and time.monotonic() - last > PROGRESS_INTERVAL_SECONDS:
                 jobs = await self.db.run(self.db.one, "SELECT id FROM jobs WHERE status='downloading'")
                 if jobs:
+                    await self.db.run(
+                        self.db.execute,
+                        "UPDATE jobs SET downloaded_bytes=?,total_bytes=?,total_estimated=? WHERE id=?",
+                        (
+                            data.get("downloaded_bytes", 0),
+                            data.get("total_bytes"),
+                            int(data.get("total_estimated", False)),
+                            jobs["id"],
+                        ),
+                    )
                     await self.notify_job(jobs["id"], "downloading", data["progress"])
                 last = time.monotonic()
         await proc.wait()
@@ -441,8 +580,8 @@ class Media:
     async def create_clip(self, source: JsonObject, values: JsonObject) -> str:
         async with self.lock, self.configured_operation():
             source = await self.db.run(self.db.one, "SELECT * FROM sources WHERE id=?", (source["id"],))
-            if not source:
-                message = "Source was deleted while waiting to extract this sound."
+            if not source or not source.get("media_available", 1):
+                message = "Source was deleted or its downloaded files were removed while waiting to extract this sound."
                 raise MediaError(message)
             if values["end"] > source["duration"]:
                 message = "The source changed. Choose a selection within its current duration."
@@ -648,7 +787,13 @@ class Media:
                 if size > budget:
                     message = "Audio upload exceeds the permitted upload limit or available media storage."
                     raise MediaError(message)
-                await asyncio.to_thread(output.write, chunk)
+                with anyio.CancelScope(shield=True):
+                    task = asyncio.create_task(asyncio.to_thread(output.write, chunk))
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        await task
+                        raise
         if not size:
             message = "Choose a non-empty audio file."
             raise MediaError(message)

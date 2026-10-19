@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from app.music_clock import MIN_FRAME_INTERVAL, MusicClock
+from app.music_clock import MIN_FRAME_INTERVAL, STALL_COOLDOWN, MusicClock
 
 
 def test_music_clock_prevents_catch_up_bursts_and_keeps_normal_frame_rate() -> None:
@@ -67,6 +67,34 @@ def test_normal_timer_wakeup_jitter_does_not_accumulate_slowdown() -> None:
     assert times[-1] - times[0] == pytest.approx(9.98, abs=0.003)
 
 
+@pytest.mark.parametrize("oversleep", [0.0047, 0.005, 0.008, 0.013])
+def test_sustained_timer_oversleep_preserves_rate_without_packet_bursts(oversleep: float) -> None:
+    now = 0.0
+    stopping = Mock()
+    stopping.is_set.return_value = False
+
+    def wait(delay: float) -> bool:
+        nonlocal now
+        now += delay + oversleep
+        return False
+
+    stopping.wait.side_effect = wait
+    clock = MusicClock(stopping)
+    times = []
+    with patch("app.music_clock.time.monotonic", side_effect=lambda: now):
+        for _ in range(4000):
+            now += 0.00155
+            assert clock.wait()
+            started = now
+            now += 0.00052
+            clock.packet_sent(started, now)
+            times.append(now)
+    elapsed = times[-1] - times[0]
+    assert elapsed == pytest.approx(79.98, abs=oversleep + 0.000001)
+    assert (len(times) - 1) / elapsed >= 49.99
+    assert all(after - before >= MIN_FRAME_INTERVAL - 1e-9 for before, after in pairwise(times))
+
+
 def test_slow_packet_send_does_not_allow_an_immediate_following_packet() -> None:
     stopping = Mock()
     stopping.is_set.return_value = False
@@ -77,7 +105,7 @@ def test_slow_packet_send_does_not_allow_an_immediate_following_packet() -> None
     clock.packet_sent(0, 0.09)
     with patch("app.music_clock.time.monotonic", return_value=0.09):
         assert clock.wait()
-    stopping.wait.assert_called_once_with(pytest.approx(MIN_FRAME_INTERVAL))
+    stopping.wait.assert_called_once_with(pytest.approx(STALL_COOLDOWN))
 
 
 def test_occasional_timer_lateness_does_not_permanently_shift_the_clock() -> None:

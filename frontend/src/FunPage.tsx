@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useUnsavedWork } from './useUnsavedWork'
+import { useSettingsDraft } from './useSettingsDraft'
+import { Loading, LoadError } from './Loading'
+import { SettingsFeedback, SaveState } from './SettingsControls'
+import { useRef, useState } from 'react'
 import { api, FunSettings } from './types'
-import { liveEvents } from './liveEvents'
 
 const items: { key: 'flashbang' | 'vine_boom' | 'sus' | 'patapim' | 'tung_sahur' | 'skibidi' | 'spion' | 'dvd' | 'goose' | 'kirby'; name: string; description: string }[] = [
   { key: 'flashbang', name: 'Flashbang', description: 'The protected Flashbang sound whites out the page 600 ms after playback starts, then fades.' },
@@ -16,25 +19,24 @@ const items: { key: 'flashbang' | 'vine_boom' | 'sus' | 'patapim' | 'tung_sahur'
 ]
 
 export function FunPage({ onError, onNotify }: { onError: (message: string) => void; onNotify: (message: string) => void }) {
-  const [settings, setSettings] = useState<FunSettings | null>(null)
+  const result = useSettingsDraft<FunSettings>('/admin/fun')
+  const settings = result.data
+  const setSettings = result.setData
   const [busy, setBusy] = useState(false)
+  const [saveState, setSaveState] = useState<SaveState>('idle')
+  const [saveError, setSaveError] = useState('')
   const saving = useRef(false)
-  useEffect(() => {
-    let active = true
-    void api<FunSettings>('/admin/fun').then(data => { if (active) setSettings(data) }).catch(error => { if (active) onError(error.message) })
-    const events = liveEvents()
-    events.addEventListener('fun.settings', event => setSettings(JSON.parse((event as MessageEvent).data)))
-    return () => { active = false; events.close() }
-  }, [onError])
+  useUnsavedWork(result.dirty || busy)
   async function save(changes: Partial<FunSettings>) {
-    if (!settings || saving.current) return
+    if (!settings || !result.current || saving.current) return
     saving.current = true
-    const previous = settings
+    setSaveState('saving'); setSaveError('')
     const next = { ...settings, ...changes }
     setSettings(next); setBusy(true)
-    try { setSettings(await api<FunSettings>('/admin/fun', 'PUT', next)); onNotify('Fun settings updated.') }
-    catch (error) { setSettings(previous); onError((error as Error).message) }
+    try { result.accept(await api<FunSettings>('/admin/fun', 'PUT', next)); setSaveState('saved'); onNotify('Fun settings updated.') }
+    catch (error) { setSettings(null); setSaveState('error'); setSaveError((error as Error).message); onError((error as Error).message) }
     finally { saving.current = false; setBusy(false) }
   }
-  return <section className="settings-panel"><h2>Fun</h2><p>Sound effects affect app viewers in the bot's voice channel. DVD and Goose are shared, silent screen effects. Kirby only affects the account spamming manual playback. Browser previews do not trigger effects.</p>{items.map(item => <div className="permission-row fun-option" key={item.key}><span className="permission-copy"><strong>{item.name}</strong><span>{item.description}</span></span><div className="fun-option-controls">{item.key === 'kirby' && <div className="kirby-settings">{([{ key: 'kirby_threshold', label: 'Play attempts', max: 100, fallback: 20 }, { key: 'kirby_window', label: 'Within seconds', max: 60, fallback: 5 }] as const).map(field => <label key={field.key}>{field.label}<input type="number" aria-label={field.label} min={1} max={field.max} step={1} key={settings?.[field.key]} defaultValue={settings?.[field.key] ?? field.fallback} disabled={!settings || busy} onBlur={event => { const value = Number(event.target.value); if (Number.isInteger(value) && value >= 1 && value <= field.max) { if (value !== settings?.[field.key]) void save({ [field.key]: value }) } else event.target.value = String(settings?.[field.key] ?? field.fallback) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} /></label>)}</div>}{item.key === 'dvd' && <label className="dvd-speed">Speed<input type="number" aria-label="DVD speed" min={0.25} max={5} step={0.25} defaultValue={settings?.dvd_speed ?? 1} key={settings?.dvd_speed ?? 1} disabled={!settings || busy} onBlur={event => { const value = Number(event.target.value); if (value >= 0.25 && value <= 5) void save({ dvd_speed: value }); else event.target.value = String(settings?.dvd_speed ?? 1) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} /><span>&times;</span></label>}<input className="permission-switch" type="checkbox" role="switch" aria-label={item.name} checked={Boolean(settings?.[item.key])} disabled={!settings || busy} onChange={() => void save({ [item.key]: !settings?.[item.key] })} /></div></div>)}</section>
+  if (!settings) return <section className="settings-panel"><h2>Screen effects</h2>{result.error ? <LoadError error={result.error} retry={result.refresh} /> : <Loading label="Loading Fun settings" shape="settings" />}</section>
+  return <section className="settings-panel"><h2>Screen effects</h2><p>Sound effects affect app viewers in the bot's voice channel. DVD and Goose are shared, silent screen effects. Kirby only affects the account spamming manual playback. Browser previews do not trigger effects.</p>{result.error ? <LoadError error={result.error} retry={result.refresh} /> : !result.current ? <Loading label="Validating Fun settings" shape="settings" /> : null}<div hidden={!result.current}>{items.map(item => <div className="permission-row fun-option" key={item.key}><span className="permission-copy"><strong>{item.name}</strong><span>{item.description}</span></span><div className="fun-option-controls">{item.key === 'kirby' && <div className="kirby-settings">{([{ key: 'kirby_threshold', label: 'Play attempts', max: 100, fallback: 20 }, { key: 'kirby_window', label: 'Within seconds', max: 60, fallback: 5 }] as const).map(field => <label key={field.key}>{field.label}<input type="number" aria-label={field.label} min={1} max={field.max} step={1} value={Number.isFinite(settings[field.key]) ? settings[field.key] : ''} onChange={event => setSettings({ ...settings, [field.key]: event.target.value ? Number(event.target.value) : NaN })} disabled={!settings || busy} onBlur={event => { const value = Number(event.target.value); if (Number.isInteger(value) && value >= 1 && value <= field.max) { if (value !== result.current?.[field.key]) void save({ [field.key]: value }) } else setSettings(null) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} /></label>)}</div>}{item.key === 'dvd' && <label className="dvd-speed">Speed<input type="number" aria-label="DVD speed" min={0.25} max={5} step={0.25} value={Number.isFinite(settings.dvd_speed) ? settings.dvd_speed : ''} onChange={event => setSettings({ ...settings, dvd_speed: event.target.value ? Number(event.target.value) : NaN })} disabled={!settings || busy} onBlur={event => { const value = Number(event.target.value); if (value >= 0.25 && value <= 5) void save({ dvd_speed: value }); else setSettings(null) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} /><span>&times;</span></label>}<input className="permission-switch" type="checkbox" role="switch" aria-label={item.name} checked={Boolean(settings?.[item.key])} disabled={!settings || busy} onChange={() => void save({ [item.key]: !settings?.[item.key] })} /></div></div>)}</div><SettingsFeedback label="Fun settings save status" state={saveState} error={saveError} automatic /></section>
 }

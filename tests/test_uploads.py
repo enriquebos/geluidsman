@@ -147,6 +147,8 @@ def test_upload_storage_and_import_budget(tmp_path: Path, setting: str) -> None:
     with TestClient(create_app(settings)) as client:
         authenticated_fixture(client.app)
         client.app.state.db.set_setting("app_settings", {setting: 100})
+        if setting == "max_storage_bytes":
+            client.app.state.media.budget.limit = 100
         result = client.post(
             "/api/clips/upload", params={"filename": "sound.mp3", "metadata": '{"name":"Sound"}'}, content=b"x" * 101
         )

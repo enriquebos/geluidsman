@@ -352,3 +352,15 @@ def test_cancelled_import_preparation_removes_staging_and_releases_reservation(t
         db.close()
 
     asyncio.run(verify())
+
+
+def test_event_overflow_requests_fresh_state_instead_of_silently_losing_invalidations() -> None:
+    events = Events("current-build")
+    queue = asyncio.Queue(maxsize=4)
+    events.clients.add(queue)
+    for _index in range(4):
+        events.publish("actions")
+    events.publish("music_playlists")
+    assert queue.qsize() == 2
+    assert 'event: refresh\ndata: {"build_id": "current-build"}' in queue.get_nowait()
+    assert "event: music_playlists" in queue.get_nowait()

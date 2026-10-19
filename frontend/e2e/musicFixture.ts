@@ -4,9 +4,9 @@ import type { MusicEntry, MusicPlaylist, MusicSnapshot, MusicTrack } from '../sr
 const song: MusicTrack = { provider: 'spotify', source_id: 'spotify-track', title: 'Dutch song', artist: 'Test artist', duration: 180, thumbnail: 'https://music-artwork.test/dutch.svg', url: 'https://open.spotify.com/track/test', youtube_id: 'yt-song', youtube_title: 'Dutch song — official audio' }
 const other: MusicTrack = { ...song, provider: 'youtube', source_id: 'yt-other', title: 'Another recording', thumbnail: 'https://music-artwork.test/other.svg', youtube_id: 'yt-other', url: 'https://www.youtube.com/watch?v=yt-other' }
 
-export async function musicFixture(page: Page, options: { mode?: 'soundboard' | 'music'; outside?: boolean; playlist?: boolean; context?: boolean; recent?: number; unresolved?: boolean } = {}) {
+export async function musicFixture(page: Page, options: { mode?: 'soundboard' | 'music'; outside?: boolean; outsideControl?: boolean; playlist?: boolean; context?: boolean; recent?: number; unresolved?: boolean; membershipEventFirst?: boolean } = {}) {
   const base = await (await page.request.get('/api/state')).json()
-  const user = { ...base.user, permissions: { ...base.user.permissions, view_music: true, control_music: true, switch_audio_mode: true } }
+  const user = { ...base.user, permissions: { ...base.user.permissions, view_music: true, control_music: true, switch_audio_mode: true, outside_voice_control: options.outsideControl || false } }
   let status = { ...base.status, audio_mode: options.mode || 'music', deafened: options.mode !== 'soundboard', connected: true, bot_ready: true, channel_name: 'Music room', channel_id: 'voice', participants: options.outside ? [] : [{ id: user.id, name: user.display_name, avatar: null }] }
   const entry: MusicEntry = { id: 'entry-1', track: song, requester_id: user.id, requester_name: user.display_name }
   let snapshot: MusicSnapshot = { state: 'paused', current: entry, queue: [entry], position: 12, shuffle: false, repeat: 'off', error: null, imports: [] }
@@ -43,8 +43,10 @@ export async function musicFixture(page: Page, options: { mode?: 'soundboard' | 
     window.EventSource = MockEvents as unknown as typeof EventSource
   })
   await page.route('https://music-artwork.test/**', route => route.fulfill({ contentType: 'image/svg+xml', body: route.request().url().includes('other') ? '<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="#24445b"/><circle cx="150" cy="128" r="94" fill="#5e8ea1"/><path d="M0 220L256 45V256H0" fill="#9bd3ca"/></svg>' : '<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="#3d264b"/><circle cx="120" cy="130" r="90" fill="#b66f92"/><path d="M0 210L256 10V120L0 256" fill="#e9bfa0"/></svg>' }))
+  await page.route('**/api/media/lease', route => route.fulfill({ json: { ok: true } }))
   await page.route('**/api/auth/me', route => route.fulfill({ json: user }))
   await page.route('**/api/state', route => { stateRequests++; return route.fulfill({ json: { ...base, user, status } }) })
+  await page.route('**/api/state/interface', route => route.fulfill({ json: { user, channels: base.channels, emojis: base.emojis, build_id: base.build_id } }))
   await page.route('**/api/playback', route => route.fulfill({ json: { status } }))
   await page.route('**/api/guilds/*/voice/volume', async route => { const volume = route.request().postDataJSON().volume; volumes.push(volume); status = { ...status, master_volume: volume, snapshot_at: (status.snapshot_at || 0) + 1 }; await route.fulfill({ json: { status } }) })
   await page.route('**/api/audio-mode', async route => { const mode = route.request().postDataJSON().mode; modes.push(mode); status = { ...status, audio_mode: mode, snapshot_at: (status.snapshot_at || 0) + 1 }; await route.fulfill({ json: { status } }) })
@@ -53,9 +55,10 @@ export async function musicFixture(page: Page, options: { mode?: 'soundboard' | 
   const library = (request: import('@playwright/test').Request) => {
     const params = new URL(request.url()).searchParams
     const selected = { provider: params.get('provider'), source_id: params.get('source_id') }
-    const all = playlists.filter(playlist => playlist.name.toLowerCase().includes((params.get('q') || '').toLowerCase())).map(playlist => ({ ...playlist, tracks: undefined, editable: true, saved: playlist.tracks.some(track => track.provider === selected.provider && track.source_id === selected.source_id), track_count: playlist.tracks.length }))
+    const all = playlists.filter(playlist => playlist.name.toLowerCase().includes((params.get('q') || '').toLowerCase())).map(playlist => ({ ...playlist, artwork: playlist.tracks.slice(0, 4).map(track => track.thumbnail).filter(Boolean), tracks: undefined, editable: true, saved: playlist.tracks.some(track => track.provider === selected.provider && track.source_id === selected.source_id), track_count: playlist.tracks.length }))
     return { playlists: all.slice(Number(params.get('offset') || 0), Number(params.get('offset') || 0) + 50), total: all.length }
   }
+  await page.route('**/api/music/cache?*', route => route.fulfill({ json: { state: 'cached' } }))
   await page.route('**/api/music/library/status', route => { const tracks: MusicTrack[] = route.request().postDataJSON().tracks; return route.fulfill({ json: { keys: tracks.filter(track => playlists.some(playlist => playlist.tracks.some(candidate => contains(track, candidate)))).map(track => `${track.provider}:${track.source_id}`) } }) })
   await page.route('**/api/music/library/status?*', route => { const params = new URL(route.request().url()).searchParams; return route.fulfill({ json: { saved: playlists.some(playlist => playlist.tracks.some(track => track.provider === params.get('provider') && track.source_id === params.get('source_id'))) } }) })
   await page.route('**/api/music/library?*', route => route.fulfill({ json: library(route.request()) }))
@@ -68,7 +71,12 @@ export async function musicFixture(page: Page, options: { mode?: 'soundboard' | 
       return { ...playlist, tracks, cache: tracks.map(() => ({ state: 'cached' as const })), updated_at: playlist.updated_at + 1 }
     })
     const playlist = playlists.find(playlist => playlist.id === id)!
-    await route.fulfill({ json: { saved: body.saved, track_count: playlist.tracks.length, updated_at: playlist.updated_at } })
+    const value = { ...playlist, artwork: playlist.tracks.slice(0, 4).map(track => track.thumbnail).filter(Boolean), saved: body.saved, track_count: playlist.tracks.length }
+    if (options.membershipEventFirst) {
+      await page.evaluate(value => (window as unknown as { musicEvents: EventTarget }).musicEvents.dispatchEvent(new MessageEvent('music_playlists', { data: JSON.stringify({ ids: [value.id], resource: `/music/playlists/${value.id}`, value }) })), value)
+      await page.waitForTimeout(250)
+    }
+    await route.fulfill({ json: value })
   })
   await page.route('**/api/music/likes', async route => {
     if (route.request().method() === 'PUT') { const { track, liked: value } = route.request().postDataJSON(); liked = liked.filter(item => item.provider !== track.provider || item.source_id !== track.source_id); if (value) liked.unshift(track); likesRevision++ }
@@ -114,5 +122,5 @@ export async function musicFixture(page: Page, options: { mode?: 'soundboard' | 
   await page.route('**/api/music/playlists/*/tracks/*', async route => { const parts = route.request().url().split('/'); const id = parts.at(-3); const index = Number(parts.at(-1)); const body = route.request().postDataJSON(); songEdits.push(body); playlists = playlists.map(item => item.id !== id ? item : { ...item, updated_at: item.updated_at + 1, tracks: item.tracks.map((track, i) => i !== index ? track : { ...track, title: body.name || track.title, ...(body.source_url ? { youtube_id: new URL(body.source_url).searchParams.get('v'), youtube_title: 'Corrected recording', match_locked: true } : {}) }), cache: item.cache?.map((cache, i) => i === index && body.source_url ? { state: 'queued', source_url: body.source_url } : cache) }); await route.fulfill({ json: playlists.find(item => item.id === id) }) })
   await page.route('**/api/music/playlists/*/cache', async route => { if (route.request().method() === 'POST') cacheRetries++; const playlist = playlists.find(item => route.request().url().includes(`/${item.id}/`)); await route.fulfill({ json: { cache: playlist?.cache || [], updated_at: playlist?.updated_at } }) })
   await page.route('**/api/music/playlists/*/play', async route => { playlistPlays++; const playlist = playlists.find(item => route.request().url().includes(`/${item.id}/`))!; const tracks = playlist.tracks.map((track, index) => ({ ...entry, id: `playlist-song-${index}`, track, origin: 'playlist' as const, playlist_id: playlist.id })); const manual = snapshot.manual_queue || snapshot.queue.filter(item => item.id !== snapshot.current?.id && item.origin !== 'playlist'); snapshot = { ...snapshot, state: 'playing', current: tracks[0], queue: [tracks[0], ...manual, ...tracks.slice(1)], manual_queue: manual, playlist_queue: tracks.slice(1), playlist: { id: playlist.id, name: playlist.name }, position: 0 }; await route.fulfill({ json: snapshot }) })
-  return { likes: () => liked, commands, modes, volumes, remoteVolume: async (value: number) => { status = { ...status, master_volume: value, snapshot_at: (status.snapshot_at || 0) + 1 }; await page.evaluate(() => (window as unknown as { musicEvents: EventTarget }).musicEvents.dispatchEvent(new MessageEvent('status', { data: '{}' }))) }, queueOrders, songEdits, addedToPlaylists, playlistPlays: () => playlistPlays, playlists: () => playlists, immediatePlays: () => immediatePlays, cacheRetries: () => cacheRetries, counts: () => ({ stateRequests, musicRequests }), remoteMode: async (next: 'soundboard' | 'music') => { status = { ...status, audio_mode: next, snapshot_at: (status.snapshot_at || 0) + 1 }; await page.evaluate(() => (window as unknown as { musicEvents: EventTarget }).musicEvents.dispatchEvent(new MessageEvent('audio-mode', { data: '{}' }))) } }
+  return { user, music: () => snapshot, likes: () => liked, commands, modes, volumes, remoteVolume: async (value: number) => { status = { ...status, master_volume: value, snapshot_at: (status.snapshot_at || 0) + 1 }; await page.evaluate(() => (window as unknown as { musicEvents: EventTarget }).musicEvents.dispatchEvent(new MessageEvent('status', { data: '{}' }))) }, queueOrders, songEdits, addedToPlaylists, playlistPlays: () => playlistPlays, playlists: () => playlists, immediatePlays: () => immediatePlays, cacheRetries: () => cacheRetries, counts: () => ({ stateRequests, musicRequests }), remoteMode: async (next: 'soundboard' | 'music') => { status = { ...status, audio_mode: next, snapshot_at: (status.snapshot_at || 0) + 1 }; await page.evaluate(() => (window as unknown as { musicEvents: EventTarget }).musicEvents.dispatchEvent(new MessageEvent('audio-mode', { data: '{}' }))) } }
 }

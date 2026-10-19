@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -8,7 +9,9 @@ if TYPE_CHECKING:
 
     from app.postgres import Connection
 
-SCHEMA_VERSION = 1
+MEDIA_SCHEMA_VERSION = 2
+PERMISSION_SCHEMA_VERSION = 3
+SCHEMA_VERSION = PERMISSION_SCHEMA_VERSION
 SCHEMA_VERSION_KEY = "database_schema_version"
 
 
@@ -82,15 +85,55 @@ def seed_totals(connection: sqlite3.Connection | Connection) -> None:
             connection.execute("INSERT INTO settings(key,value) VALUES (?,?)", (marker, "true"))
 
 
+def upgrade_media_columns(connection: sqlite3.Connection | Connection, *, postgres: bool) -> None:
+    for table, definitions in (
+        ("sources", {"media_available": "INTEGER NOT NULL DEFAULT 1"}),
+        (
+            "jobs",
+            {
+                "downloaded_bytes": "BIGINT NOT NULL DEFAULT 0",
+                "total_bytes": "BIGINT",
+                "total_estimated": "INTEGER NOT NULL DEFAULT 0",
+            },
+        ),
+    ):
+        rows = (
+            connection.execute(
+                "SELECT column_name AS name FROM information_schema.columns "
+                "WHERE table_schema=current_schema() AND table_name=?",
+                (table,),
+            ).fetchall()
+            if postgres
+            else connection.execute(f"PRAGMA table_info({table})").fetchall()
+        )
+        columns = {row["name"] for row in rows}
+        for column, definition in definitions.items():
+            if columns and column not in columns:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def merge_voice_permissions(connection: sqlite3.Connection | Connection) -> None:
+    for row in connection.execute("SELECT id,permission_overrides FROM users").fetchall():
+        overrides = json.loads(row["permission_overrides"])
+        legacy = [overrides.pop(key) for key in ("play_outside_voice", "always_live_conversation") if key in overrides]
+        if legacy:
+            overrides.setdefault("outside_voice_control", any(legacy))
+            connection.execute("UPDATE users SET permission_overrides=? WHERE id=?", (json.dumps(overrides), row["id"]))
+
+
 def initialize_schema(connection: sqlite3.Connection | Connection, *, postgres: bool) -> None:
     version = schema_version(connection, postgres=postgres)
     if version > SCHEMA_VERSION:
         message = "Database schema is newer than this application supports"
         raise RuntimeError(message)
-    if version < SCHEMA_VERSION:
+    if version < MEDIA_SCHEMA_VERSION:
         upgrade_columns(connection, postgres=postgres)
+    if version < MEDIA_SCHEMA_VERSION:
+        upgrade_media_columns(connection, postgres=postgres)
     filename = "schema.sql" if postgres else "schema_sqlite.sql"
     connection.executescript(Path(__file__).with_name(filename).read_text(encoding="utf-8"))
+    if version < PERMISSION_SCHEMA_VERSION:
+        merge_voice_permissions(connection)
     if version < SCHEMA_VERSION:
         seed_totals(connection)
         connection.execute(

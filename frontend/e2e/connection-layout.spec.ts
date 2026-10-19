@@ -10,7 +10,7 @@ test('global connection header, human sidebar, account logout and outside-channe
       const response = await route.fetch()
       const data = await response.json()
       const user = endpoint.endsWith('/me') ? data : data.user
-      user.permissions.play_outside_voice = outside
+      user.permissions.outside_voice_control = outside
       if (endpoint.endsWith('/state')) data.status = { ...data.status, connected: true, bot_ready: true, channel_name: 'Voice room', participants: [{ id: '200', name: 'Human guest', avatar: null }] }
       await route.fulfill({ json: data })
     })

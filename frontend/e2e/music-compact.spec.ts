@@ -6,7 +6,7 @@ test('compact playlist rows keep download details out of the list and expose the
   const error = 'YouTube requires age verification for this recording. Choose another recording.'
   let downloading = false
   const playlist = app.playlists()[0]
-  await page.route('**/api/music/playlists/existing', route => route.fulfill({ json: { ...playlist, cache: [{ state: 'cached' }, { state: downloading ? 'downloading' : 'failed', error }] } }))
+  await page.route('**/api/music/playlists/existing/cache', route => route.fulfill({ json: { updated_at: playlist.updated_at, cache: [{ state: 'cached' }, { state: downloading ? 'downloading' : 'failed', error }] } }))
   await page.goto('/music?tab=playlists&playlist=existing')
   const songs = page.getByLabel('Playlist songs', { exact: true })
   await expect(songs.getByRole('button', { name: 'Downloaded: Dutch song', exact: true })).toBeVisible()
@@ -50,11 +50,10 @@ test('read-only playlist rows retain saving without exposing edit or remove', as
   await page.goto('/music?tab=playlists&playlist=existing')
   const songs = page.getByLabel('Playlist songs', { exact: true })
   await expect(songs.locator('.music-save')).toHaveCount(2)
-  const trigger = songs.getByRole('button', { name: 'More options for Dutch song', exact: true })
+  await expect(songs.getByRole('button', { name: 'More options for Dutch song', exact: true })).toHaveCount(0)
+  const trigger = songs.getByRole('button', { name: 'Save Dutch song to playlists', exact: true })
+  await songs.locator('article').first().hover()
   await trigger.click()
-  await expect(page.getByRole('menuitem', { name: 'Edit', exact: true })).toHaveCount(0)
-  await expect(page.getByRole('menuitem', { name: 'Remove from playlist', exact: true })).toHaveCount(0)
-  await page.getByRole('menuitem', { name: 'Add to playlist', exact: true }).click()
   const menu = page.getByRole('dialog', { name: 'Save Dutch song', exact: true })
   await menu.getByRole('checkbox', { name: /Liked Songs/ }).click()
   await expect(menu.getByRole('checkbox', { name: /Liked Songs/ })).toHaveAttribute('aria-checked', 'true')

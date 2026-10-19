@@ -7,12 +7,13 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from app.config import Settings
-from app.database_schema import SCHEMA_VERSION_KEY
+from app.database_schema import SCHEMA_VERSION, SCHEMA_VERSION_KEY
 from app.db import Database
 from app.goose_sketches import Sketch, change_library, resolve_sketch
 from app.main import create_app
@@ -101,6 +102,9 @@ def test_postgres_api(database: Database, tmp_path: Path) -> None:
             "INSERT INTO conversation_messages(id,session_id,speaker_id,speaker_name,started_at,ended_at,"
             "text,language) VALUES (?,?,?,?,?,?,?,?)",
             ("message", "session", "100", "Member", time.time(), time.time(), "Hallo", "nl"),
+        )
+        app.state.db.execute(
+            "UPDATE users SET permission_overrides=? WHERE id='100'", ('{"outside_voice_control":true}',)
         )
         app.state.conversation.session = app.state.db.one("SELECT * FROM conversations WHERE id='session'")
         assert client.get("/api/conversations/session/messages").json()["items"][0]["text"] == "Hallo"
@@ -202,7 +206,13 @@ def test_postgres_shared_goose_library_preserves_settings(database: Database) ->
 def test_postgres_personal_music_likes_persist_and_feed_downloads(database: Database) -> None:
     member = {"id": "200", "display_name": "Member"}
     other = {"id": "300", "display_name": "Other"}
-    song = MusicTrack(provider="youtube", source_id="abcdefghijk", title="Song", duration=120).model_dump()
+    song = MusicTrack(
+        provider="youtube",
+        source_id="abcdefghijk",
+        title="Song",
+        duration=120,
+        thumbnail="https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg",
+    ).model_dump()
     store = MusicStore(database)
     first = store.set_like(member, song, liked=True)
     assert first["keys"] == ["youtube:abcdefghijk"]
@@ -223,7 +233,13 @@ def test_postgres_music_library_membership_search_and_idempotence(database: Data
     )
     store = MusicStore(database)
     playlist = store.create("100%_beats!", user)
-    song = MusicTrack(provider="youtube", source_id="abcdefghijk", title="Song", duration=120).model_dump()
+    song = MusicTrack(
+        provider="youtube",
+        source_id="abcdefghijk",
+        title="Song",
+        duration=120,
+        thumbnail="https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg",
+    ).model_dump()
     first = store.set_membership(playlist["id"], user, song, saved=True)
     assert store.set_membership(playlist["id"], user, song, saved=True) == first
     assert store.saved("youtube", "abcdefghijk") == {"saved": True}
@@ -237,6 +253,7 @@ def test_postgres_music_library_membership_search_and_idempotence(database: Data
     assert page["total"] == 1
     assert page["playlists"][0]["saved"] is True
     assert page["playlists"][0]["editable"] is True
+    assert page["playlists"][0]["artwork"] == [song["thumbnail"]]
     assert "tracks" not in page["playlists"][0]
     store.set_membership(playlist["id"], user, song, saved=False)
     assert store.saved("youtube", "abcdefghijk") == {"saved": False}
@@ -276,7 +293,7 @@ def test_postgres_legacy_upgrade_preserves_rows_and_initializes_totals(database:
         (1, "100", "Member", "sound.play", "clip", "Sound", "success", "1352422295402057759", "{}"),
     )
     database.conn.initialize()
-    assert database.setting(SCHEMA_VERSION_KEY) == 1
+    assert database.setting(SCHEMA_VERSION_KEY) == SCHEMA_VERSION
     assert database.one("SELECT action,delay FROM conversation_triggers WHERE id='trigger'") == {
         "action": "play",
         "delay": 0,
@@ -309,4 +326,84 @@ def test_postgres_failed_legacy_upgrade_rolls_back_schema_changes(database: Data
     assert not {"action", "delay"} & {row["column_name"] for row in columns}
     assert database.setting(SCHEMA_VERSION_KEY) is None
     database.conn.initialize()
-    assert database.setting(SCHEMA_VERSION_KEY) == 1
+    assert database.setting(SCHEMA_VERSION_KEY) == SCHEMA_VERSION
+
+
+def test_runtime_connection_loss_recovers_without_reinitializing_schema(database: Database) -> None:
+    database.set_setting("reconnect-marker", "preserved")
+    original = database.conn.raw
+    backend_id = original.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"]
+    control = Connection(URL)
+    try:
+        control.raw.execute("SELECT pg_terminate_backend(%s)", (backend_id,))
+        with pytest.raises(psycopg.OperationalError):
+            database.one("SELECT 1 AS ready")
+        assert database.setting("reconnect-marker") == "preserved"
+        assert database.conn.raw is not original
+        assert (
+            database.conn.raw.execute("SHOW pg_trgm.word_similarity_threshold").fetchone()[
+                "pg_trgm.word_similarity_threshold"
+            ]
+            == "0.3"
+        )
+        database.set_setting("reconnect-marker", "updated")
+        assert database.setting("reconnect-marker") == "updated"
+    finally:
+        control.close()
+
+
+def test_postgres_media_upgrade_preserves_sources_jobs_and_markers(database: Database) -> None:
+    database.save_source(source(), [])
+    identity = database.add_job("https://example.com/video")
+    database.set_setting("app_settings", {"max_storage_bytes": 321})
+    database.set_setting(SCHEMA_VERSION_KEY, 1)
+    original = database.one("SELECT id,title,url FROM sources")
+    database.execute("ALTER TABLE sources DROP COLUMN media_available")
+    for column in ("downloaded_bytes", "total_bytes", "total_estimated"):
+        database.execute("ALTER TABLE jobs DROP COLUMN " + column)
+    database.execute("DROP TABLE media_usage")
+    database.conn.initialize()
+    assert database.one("SELECT id,title,url FROM sources") == original
+    assert database.one("SELECT media_available FROM sources")["media_available"] == 1
+    assert database.one("SELECT downloaded_bytes,total_bytes FROM jobs WHERE id=?", (identity,)) == {
+        "downloaded_bytes": 0,
+        "total_bytes": None,
+    }
+    assert database.setting("app_settings") == {"max_storage_bytes": 321}
+    assert database.setting("activity_totals_initialized") is True
+    assert database.setting("sound_play_totals_initialized") is True
+    assert database.setting(SCHEMA_VERSION_KEY) == SCHEMA_VERSION
+    assert database.rows("SELECT * FROM media_usage") == []
+
+
+def test_postgres_merges_voice_permissions_and_preserves_markers(database: Database) -> None:
+    for identity, overrides in (
+        ("grant", {"play_outside_voice": True, "always_live_conversation": False}),
+        ("deny", {"always_live_conversation": False}),
+        ("current", {"play_outside_voice": True, "outside_voice_control": False}),
+        ("default", {}),
+    ):
+        database.execute(
+            "INSERT INTO users(id,username,display_name,created_at,last_login,permission_overrides) "
+            "VALUES (?,?,?,1,2,?)",
+            (identity, identity, identity, json.dumps({**overrides, "control_music": False})),
+        )
+    database.set_setting(SCHEMA_VERSION_KEY, 2)
+    database.set_setting("retained_queue", ["first", "second"])
+    database.conn.initialize()
+    values = {
+        row["id"]: json.loads(row["permission_overrides"])
+        for row in database.rows("SELECT id,permission_overrides FROM users")
+    }
+    assert values == {
+        "grant": {"outside_voice_control": True, "control_music": False},
+        "deny": {"outside_voice_control": False, "control_music": False},
+        "current": {"outside_voice_control": False, "control_music": False},
+        "default": {"control_music": False},
+    }
+    assert database.setting("retained_queue") == ["first", "second"]
+    assert database.setting("activity_totals_initialized") is True
+    assert database.setting("sound_play_totals_initialized") is True
+    assert database.setting(SCHEMA_VERSION_KEY) == SCHEMA_VERSION
+    database.conn.initialize()
+    assert database.rows("SELECT id FROM users ORDER BY id") == [{"id": key} for key in sorted(values)]

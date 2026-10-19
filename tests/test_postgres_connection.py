@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 @pytest.fixture
 def connection_mocks(monkeypatch: pytest.MonkeyPatch) -> tuple[Mock, Mock]:
     connect = Mock(return_value=MagicMock(spec=psycopg.Connection))
+    connect.return_value.closed = False
     sleep = Mock()
     monkeypatch.setattr("app.postgres.psycopg.connect", connect)
     monkeypatch.setattr("app.postgres.time.sleep", sleep)
@@ -42,6 +43,7 @@ def test_initial_connection_recovers(
 ) -> None:
     connect, sleep = connection_mocks
     raw = Mock(spec=psycopg.Connection)
+    raw.closed = False
     connect.side_effect = [error(), error(), raw]
 
     connection = Connection("postgresql://database/example")
@@ -121,3 +123,78 @@ def test_schema_failure_does_not_retry_and_closes_connection(
     connect.assert_called_once()
     connect.return_value.close.assert_called_once()
     sleep.assert_not_called()
+
+
+def test_lost_connection_recovers_on_next_request_without_replaying_write(connection_mocks: tuple[Mock, Mock]) -> None:
+    connect, sleep = connection_mocks
+    connection = Connection("postgresql://database/example")
+    original = connection.raw
+
+    def fail_write(*_args: object) -> None:
+        original.closed = True
+        error = "Connection lost"
+        raise psycopg.OperationalError(error)
+
+    original.execute.side_effect = fail_write
+    with pytest.raises(psycopg.OperationalError):
+        connection.execute("UPDATE settings SET value=? WHERE key=?", ("value", "key"))
+    original.execute.assert_called_once()
+    connect.assert_called_once()
+    restored = MagicMock(spec=psycopg.Connection)
+    restored.closed = False
+    connect.return_value = restored
+
+    connection.execute("SELECT 1 AS ready")
+
+    assert connect.call_count == 2
+    assert connection.raw is restored
+    assert restored.execute.call_args_list == [
+        call("SET pg_trgm.word_similarity_threshold=0.3"),
+        call("SELECT 1 AS ready", None),
+    ]
+    sleep.assert_not_called()
+
+
+def test_runtime_connection_attempt_is_bounded_and_can_recover_later(connection_mocks: tuple[Mock, Mock]) -> None:
+    connect, sleep = connection_mocks
+    connection = Connection("postgresql://database/example")
+    connection.raw.closed = True
+    connect.side_effect = psycopg.OperationalError()
+    with pytest.raises(psycopg.OperationalError):
+        connection.execute("SELECT 1")
+    assert connect.call_count == 2
+    sleep.assert_not_called()
+    restored = MagicMock(spec=psycopg.Connection)
+    restored.closed = False
+    connect.side_effect = None
+    connect.return_value = restored
+    connection.execute("SELECT 1")
+    assert connection.raw is restored
+
+
+def test_lost_transaction_never_reconnects_midway(connection_mocks: tuple[Mock, Mock]) -> None:
+    connect, _ = connection_mocks
+    connection = Connection("postgresql://database/example")
+    original = connection.raw
+    with connection:
+        original.closed = True
+        with pytest.raises(psycopg.OperationalError, match="during a transaction"):
+            connection.execute("UPDATE settings SET value='partial'")
+        with pytest.raises(psycopg.OperationalError, match="during a transaction"), connection:
+            pass
+        connect.assert_called_once()
+    restored = MagicMock(spec=psycopg.Connection)
+    restored.closed = False
+    connect.return_value = restored
+    with connection:
+        connection.execute("SELECT 1")
+    assert connection.raw is restored
+
+
+def test_deliberate_close_never_reconnects(connection_mocks: tuple[Mock, Mock]) -> None:
+    connect, _ = connection_mocks
+    connection = Connection("postgresql://database/example")
+    connection.close()
+    with pytest.raises(psycopg.InterfaceError):
+        connection.execute("SELECT 1")
+    connect.assert_called_once()

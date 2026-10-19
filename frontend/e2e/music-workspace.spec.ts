@@ -5,7 +5,12 @@ async function likeFromSaveMenu(page: Page, scope: Locator, title: string) {
   const direct = scope.getByRole('button', { name: `Save ${title} to playlists`, exact: true })
   await expect(direct.or(scope.getByRole('button', { name: `More options for ${title}`, exact: true })).first()).toBeVisible()
   if (await direct.count()) { const row = direct.locator('xpath=ancestor::article'); if (await row.count()) await row.hover(); await direct.click() }
-  else { await scope.getByRole('button', { name: `More options for ${title}`, exact: true }).click(); await page.getByRole('menuitem', { name: 'Add to playlist', exact: true }).click() }
+  else {
+    await scope.getByRole('button', { name: `More options for ${title}`, exact: true }).click()
+    const action = page.getByRole('menuitem', { name: 'Save to Liked Songs', exact: true })
+    if (await page.getByRole('menuitem', { name: 'Add to playlist', exact: true }).getAttribute('aria-haspopup') === 'menu') { const saved = page.waitForResponse(response => response.url().endsWith('/api/music/likes') && response.request().method() === 'PUT'); await action.click(); await saved; return }
+    await page.getByRole('menuitem', { name: 'Add to playlist', exact: true }).click()
+  }
   const menu = page.getByRole('dialog', { name: `Save ${title}`, exact: true })
   await menu.getByRole('checkbox', { name: /Liked Songs/ }).click()
   await expect(menu.getByRole('checkbox', { name: /Liked Songs/ })).toHaveAttribute('aria-checked', 'true')
@@ -16,7 +21,12 @@ async function unlikeFromSaveMenu(page: Page, scope: Locator, title: string, dis
   const direct = scope.getByRole('button', { name: `Save ${title} to playlists`, exact: true })
   await expect(direct.or(scope.getByRole('button', { name: `More options for ${title}`, exact: true })).first()).toBeVisible()
   if (await direct.count()) { const row = direct.locator('xpath=ancestor::article'); if (await row.count()) await row.hover(); await direct.click() }
-  else { await scope.getByRole('button', { name: `More options for ${title}`, exact: true }).click(); await page.getByRole('menuitem', { name: 'Add to playlist', exact: true }).click() }
+  else {
+    await scope.getByRole('button', { name: `More options for ${title}`, exact: true }).click()
+    const action = page.getByRole('menuitem', { name: 'Remove from Liked Songs', exact: true })
+    if (await page.getByRole('menuitem', { name: 'Add to playlist', exact: true }).getAttribute('aria-haspopup') === 'menu') { const saved = page.waitForResponse(response => response.url().endsWith('/api/music/likes') && response.request().method() === 'PUT'); await action.click(); await saved; return }
+    await page.getByRole('menuitem', { name: 'Add to playlist', exact: true }).click()
+  }
   const menu = page.getByRole('dialog', { name: `Save ${title}`, exact: true })
   await menu.getByRole('checkbox', { name: /Liked Songs/ }).click()
   if (disappears) await expect(menu).toHaveCount(0)
@@ -109,7 +119,8 @@ test('search top result and compact rows use the existing music controls', async
   await expect(page.locator('.music-top-result')).toContainText('Top result')
   await page.getByRole('button', { name: 'Play Dutch song now', exact: true }).click()
   await expect.poll(() => app.immediatePlays()).toBe(1)
-  await page.getByRole('button', { name: 'Add Another recording to queue', exact: true }).click()
+  await page.getByLabel('Search results', { exact: true }).getByRole('button', { name: 'More options for Another recording', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Add to queue', exact: true }).click()
   await page.getByRole('button', { name: 'Queue', exact: true }).click()
   await expect(page.getByRole('complementary', { name: 'Music queue', exact: true })).toBeVisible()
   await expect(page.getByLabel('Search results', { exact: true })).toBeVisible()

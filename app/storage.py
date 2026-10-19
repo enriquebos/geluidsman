@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import threading
 import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.media import Media
+    from app.music_cache import MusicCache
 from pathlib import Path
 
 RECONCILE_SECONDS = 600
@@ -11,7 +18,10 @@ RECONCILE_SECONDS = 600
 
 def size(path: Path) -> int:
     if path.is_file():
-        return path.stat().st_size
+        try:
+            return path.stat().st_size
+        except FileNotFoundError:
+            return 0
     total = 0
     pending = [path]
     while pending:
@@ -66,3 +76,40 @@ class Storage:
             self.total += measured - self.folders.pop(path.name, 0)
             if measured:
                 self.folders[path.name] = measured
+
+
+class MediaBudget:
+    def __init__(self, media: Media, cache: MusicCache) -> None:
+        self.media, self.cache = media, cache
+        self.lock = threading.RLock()
+        self.reservations: dict[str, int] = {}
+        values = media.db.setting("app_settings", {})
+        if not isinstance(values.get("media_max_bytes"), int):
+            values["media_max_bytes"] = media.base_settings.media_max_bytes or (
+                values.get("max_storage_bytes", media.base_settings.max_storage_bytes)
+                + media.base_settings.music_cache_max_bytes
+            )
+            media.db.set_setting("app_settings", values)
+        self.limit = values["media_max_bytes"]
+
+    def used(self) -> int:
+        return self.media.storage.used() + self.cache.used + sum(self.cache.manifest_sizes.values())
+
+    def reserve(self, key: str, maximum: int) -> int:
+        with self.lock:
+            available = min(
+                self.limit - self.used() - sum(self.reservations.values()),
+                shutil.disk_usage(self.media.root).free - 256_000_000 - sum(self.reservations.values()),
+            )
+            amount = max(0, min(maximum, available))
+            if amount:
+                self.reservations[key] = amount
+            return amount
+
+    def release(self, key: str) -> None:
+        with self.lock:
+            self.reservations.pop(key, None)
+
+
+def fingerprint(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()

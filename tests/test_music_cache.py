@@ -736,3 +736,19 @@ def test_shared_download_waiters_do_not_cancel_each_other_and_failures_are_repor
             db.close()
 
     asyncio.run(verify())
+
+
+def test_progress_distinguishes_group_changes_from_byte_updates(tmp_path: Path) -> None:
+    db, _store, sources, cache, _user = parts(tmp_path)
+    key = cache_key(song())
+    cache.progress(key, 1, None)
+    first = cache.events.publish.call_args.args[1]
+    assert first["counts_changed"] is True
+    cache.progress_at.clear()
+    cache.progress(key, 20, 100)
+    second = cache.events.publish.call_args.args[1]
+    assert second["counts_changed"] is False
+    assert second["download_update"] == {"downloaded_bytes": 20, "total_bytes": 100}
+    assert second["ids"] == ["music:" + key]
+    db.close()
+    asyncio.run(sources.close())

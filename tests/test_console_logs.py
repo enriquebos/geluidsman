@@ -44,3 +44,10 @@ def test_console_preserves_words_containing_authentication_scheme(tmp_path: Path
     message = "robot connected and tokenizer loaded"
 
     assert console.redact(message) == message
+
+
+@pytest.mark.parametrize("outcome", ["requested_stop", "completed", "unexpected_exit"])
+def test_music_cleanup_outcome_survives_secret_redaction(tmp_path: Path, outcome: str) -> None:
+    console = ConsoleLogs(Settings(_env_file=None, data_dir=tmp_path))
+    message = f"Music decoder cleanup: pid=123 outcome={outcome} exit_before_cleanup=None"
+    assert console.redact(message) == message

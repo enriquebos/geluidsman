@@ -162,5 +162,11 @@ class TriggerPlayback:
             outcome="rejected" if reason else "success",
             details=details,
         )
-        self.events.publish("audit")
-        self.events.publish(context.namespace if context.namespace == "actions" else "conversation")
+        self.events.publish(
+            "audit",
+            {"scope": "audit.activity", "ids": [clip["id"]]} if clip and not reason and not stopping else None,
+        )
+        self.events.publish(
+            context.namespace if context.namespace == "actions" else "conversation",
+            {"scope": context.namespace + ".status"},
+        )

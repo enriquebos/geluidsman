@@ -6,7 +6,7 @@ import { useConversationMessages } from './conversationMessages'
 export type LiveStatus = { enabled: boolean; recording: boolean; can_read_transcript?: boolean; session: { id: string; channel_name: string; started_at: number; ended_at: number | null } | null; participants: { id: string; name: string; avatar: string | null }[] }
 
 export function canReadConversation(user: User, status: LiveStatus | null) {
-  return can(user, 'view_conversations') && (status?.can_read_transcript ?? (can(user, 'always_live_conversation') || Boolean(status?.participants.some(person => person.id === user.id))))
+  return can(user, 'view_conversations') && (status?.can_read_transcript ?? (can(user, 'outside_voice_control') || Boolean(status?.participants.some(person => person.id === user.id))))
 }
 export function ConversationChat({ user, status, onError }: { user: User; status: LiveStatus; onError: (message: string) => void }) {
   const [newMessages, setNewMessages] = useState(false)

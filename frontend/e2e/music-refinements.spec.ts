@@ -47,8 +47,9 @@ test('large playlists scroll inside their pane and never move the Music document
   expect(await page.evaluate(() => window.scrollY)).toBe(0)
   expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(page.viewportSize()!.height)
   await page.getByRole('navigation', { name: 'Main navigation', exact: true }).getByRole('button', { name: 'Soundboard', exact: true }).click()
-  await expect(page.locator('html')).not.toHaveClass(/music-page-active/)
-  expect(await page.locator('body').evaluate(element => getComputedStyle(element).position)).not.toBe('fixed')
+  await expect(page.locator('html')).toHaveClass(/music-page-active/)
+  expect(await page.locator('body').evaluate(element => getComputedStyle(element).position)).toBe('fixed')
+  await expect(page.getByRole('region', { name: 'Soundboard content', exact: true })).toBeVisible()
 })
 
 test('seeking keeps the chosen position through delayed responses and coalesces another seek', async ({ page }) => {

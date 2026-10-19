@@ -105,7 +105,7 @@ class Actions:
             task.cancel()
         while not self.queue.empty():
             self.queue.get_nowait()
-        self.events.publish("actions")
+        self.events.publish("actions", {"scope": "actions.status"})
 
     def synchronize(self) -> None:
         voice = self.bot.voice
@@ -127,7 +127,7 @@ class Actions:
                 for member in voice.channel.members
                 if not member.bot and getattr(member, "voice", None)
             }
-        self.events.publish("actions")
+        self.events.publish("actions", {"scope": "actions.status"})
 
     def receive(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
         if member.bot or member.guild.id != self.settings.discord_guild_id:
@@ -292,7 +292,7 @@ class Actions:
             except (*DATABASE_ERRORS, discord.DiscordException, RuntimeError, ValueError) as error:
                 self.error = "Action queue audit failed. Check the admin console."
                 logging.getLogger("app.actions").exception("Action queue audit failed (%s)", type(error).__name__)
-                self.events.publish("actions")
+                self.events.publish("actions", {"scope": "actions.status"})
             await asyncio.sleep(0.25)
 
     async def flush_overflow(self) -> None:
@@ -324,7 +324,7 @@ class Actions:
             except (*DATABASE_ERRORS, discord.DiscordException, RuntimeError, ValueError) as error:
                 self.error = "Action processing failed. Check the admin console."
                 logging.getLogger("app.actions").exception("Action processing failed (%s)", type(error).__name__)
-                self.events.publish("actions")
+                self.events.publish("actions", {"scope": "actions.status"})
             finally:
                 self.processing = 0
 
@@ -377,7 +377,7 @@ class Actions:
         if not task.cancelled() and task.exception():
             self.error = "Action execution failed. Check the admin console."
             logging.getLogger("app.actions").error("Action execution failed (%s)", type(task.exception()).__name__)
-        self.events.publish("actions")
+        self.events.publish("actions", {"scope": "actions.status"})
 
     async def skipped(self, rule: dict, event: VoiceEvent, reason: str) -> None:
         await self.db.run(

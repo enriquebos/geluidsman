@@ -1,35 +1,39 @@
 import { expect, test } from '@playwright/test'
 import { musicFixture } from './musicFixture'
 
-test('save menu keeps its size while loading, reopens immediately and retains rows during refresh', async ({ page }) => {
+test('save menu keeps its size and validates on reopening and refresh before showing choices', async ({ page }) => {
   await musicFixture(page, { playlist: true })
   let requests = 0
-  let release: (() => Promise<void>) | undefined
-  await page.route('**/api/music/library?*', route => { requests++; release = () => route.fallback() })
+  let release = () => {}
+  let hold: Promise<void> | null = new Promise(resolve => { release = resolve })
+  await page.route('**/api/music/library?*', async route => { requests++; await hold; await route.fallback() })
   await page.goto('/music')
   const trigger = page.locator('.music-player-track').getByRole('button', { name: 'Save Dutch song to playlists', exact: true })
   await trigger.click()
   const menu = page.getByRole('dialog', { name: 'Save Dutch song', exact: true })
-  await expect(menu.getByRole('status', { name: 'Loading playlists' })).toBeVisible()
+  await expect(menu.getByRole('status').filter({ hasText: 'Loading playlists' })).toBeVisible()
   const position = () => menu.evaluate(element => ({ top: (element as HTMLElement).style.top, height: element.clientHeight }))
   const before = await position()
-  await expect.poll(() => Boolean(release)).toBe(true)
-  await release!()
+  hold = null; release()
   await expect(menu.getByRole('checkbox', { name: /Favourites/ })).toBeVisible()
   expect(await position()).toEqual(before)
   await menu.getByRole('button', { name: 'Done', exact: true }).click()
   const loadedRequests = requests
+  hold = new Promise(resolve => { release = resolve })
   await trigger.click()
-  await expect(menu.getByRole('checkbox', { name: /Favourites/ })).toBeVisible()
-  await expect(menu.getByRole('status', { name: 'Loading playlists' })).toHaveCount(0)
-  expect(requests).toBe(loadedRequests)
-  release = undefined
-  await page.evaluate(() => (window as unknown as { musicEvents: EventTarget }).musicEvents.dispatchEvent(new MessageEvent('music_playlists', { data: '{}' })))
-  await expect.poll(() => Boolean(release)).toBe(true)
-  await expect(menu.locator('.music-save-choices')).toHaveAttribute('aria-busy', 'true')
-  await expect(menu.getByRole('checkbox', { name: /Favourites/ })).toBeVisible()
+  await expect.poll(() => requests).toBeGreaterThan(loadedRequests)
+  await expect(menu.getByRole('checkbox', { name: /Favourites/ })).toHaveCount(0)
   expect(await position()).toEqual(before)
-  await release!()
+  hold = null; release()
+  await expect(menu.getByRole('checkbox', { name: /Favourites/ })).toBeVisible()
+  const confirmedRequests = requests
+  hold = new Promise(resolve => { release = resolve })
+  await page.evaluate(() => (window as unknown as { musicEvents: EventTarget }).musicEvents.dispatchEvent(new MessageEvent('music_playlists', { data: '{}' })))
+  await expect.poll(() => requests).toBeGreaterThan(confirmedRequests)
+  await expect(menu.locator('.music-save-choices')).toHaveAttribute('aria-busy', 'true')
+  await expect(menu.getByRole('checkbox', { name: /Favourites/ })).toHaveCount(0)
+  expect(await position()).toEqual(before)
+  hold = null; release()
   await expect(menu.locator('.music-save-choices')).toHaveAttribute('aria-busy', 'false')
 })
 

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 
-from app.music_access import music_voice_access
+from app.music_access import music_voice_access, recheck_music_voice_access
 from app.music_library import register_library_routes
 from app.music_models import (
     MusicImportInput,
@@ -18,8 +18,9 @@ from app.music_models import (
     PlaylistInput,
     PlaylistUpdate,
 )
-from app.music_playlist_tracks import register_playlist_track_routes
+from app.music_playlist_tracks import publish_saved_playlist, register_playlist_track_routes
 from app.music_sources import MAX_QUERY, MusicSourceError
+from app.music_uploads import register_music_upload_routes
 from app.permissions import require_permission
 
 if TYPE_CHECKING:
@@ -31,6 +32,23 @@ async def player_result(result: Awaitable[dict]) -> dict:
         return await result
     except ValueError as error:
         raise HTTPException(409, str(error)) from None
+
+
+def saved_origin(body: MusicTracksInput, request: Request) -> dict | None:
+    reference = body.saved_origin
+    if reference is None:
+        return None
+    store, user = request.app.state.music_store, request.state.user
+    row = store.liked(user) if reference.playlist_id == "liked" else store.playlist(reference.playlist_id)
+    if row["updated_at"] != reference.expected_updated_at or reference.index >= len(row["tracks"]):
+        raise HTTPException(409, "This saved song changed. Review it before adding it to the queue.")
+    if (
+        len(body.tracks) != 1
+        or body.tracks[0].model_dump()
+        != MusicTracksInput(tracks=[row["tracks"][reference.index]]).tracks[0].model_dump()
+    ):
+        raise HTTPException(409, "This recording no longer matches the saved song.")
+    return {"playlist_id": reference.playlist_id, "owner_id": user["id"]}
 
 
 def tracks_for_player(body: MusicTracksInput, request: Request) -> list[dict]:
@@ -71,6 +89,7 @@ def register_music_routes(app: FastAPI) -> None:
     register_queue_routes(app)
     register_playlist_routes(app)
     register_playlist_track_routes(app)
+    register_music_upload_routes(app)
     register_playlist_playback(app)
     register_likes_routes(app)
     register_library_routes(app)
@@ -114,7 +133,7 @@ def register_likes_routes(app: FastAPI) -> None:
     @app.post("/api/music/likes/cache", **options)
     async def retry_liked_cache(request: Request) -> dict:
         row = await app.state.db.run(app.state.music_store.liked, request.state.user)
-        app.state.music_cache.retry(row["tracks"])
+        await app.state.music_cache.retry_verified(row["tracks"])
         return {"ok": True}
 
     async def playable(request: Request) -> list[dict]:
@@ -134,7 +153,7 @@ def register_likes_routes(app: FastAPI) -> None:
                 tracks,
                 request.state.user,
                 {"id": "liked:" + request.state.user["id"], "name": "Liked Songs"},
-                guard=lambda: music_voice_access(app, request.state.user),
+                guard=lambda: recheck_music_voice_access(app, request.state.user["id"]),
             )
         )
 
@@ -143,7 +162,10 @@ def register_likes_routes(app: FastAPI) -> None:
         tracks = await playable(request)
         return await player_result(
             app.state.music.enqueue(
-                tracks, request.state.user, guard=lambda: music_voice_access(app, request.state.user)
+                tracks,
+                request.state.user,
+                guard=lambda: recheck_music_voice_access(app, request.state.user["id"]),
+                saved_origin={"playlist_id": "liked", "owner_id": request.state.user["id"]},
             )
         )
 
@@ -154,10 +176,15 @@ def register_player_routes(app: FastAPI) -> None:
     @app.post("/api/music/play", **options)
     async def play_now(body: MusicTrackInput, request: Request) -> dict:
         music_voice_access(app, request.state.user)
-        tracks = tracks_for_player(MusicTracksInput(tracks=[body.track]), request)
+        collection = MusicTracksInput(tracks=[body.track], saved_origin=body.saved_origin)
+        reference = await app.state.db.run(saved_origin, collection, request)
+        tracks = tracks_for_player(collection, request)
         return await player_result(
             app.state.music.play_now(
-                tracks[0], request.state.user, guard=lambda: music_voice_access(app, request.state.user)
+                tracks[0],
+                request.state.user,
+                guard=lambda: recheck_music_voice_access(app, request.state.user["id"]),
+                saved_origin=reference,
             )
         )
 
@@ -171,7 +198,9 @@ def register_player_routes(app: FastAPI) -> None:
         if body.action == "shuffle" and body.value not in {None, 0, 1}:
             raise HTTPException(422, "Choose shuffle on or off.")
         return await player_result(
-            app.state.music.command(body.action, body.value, guard=lambda: music_voice_access(app, request.state.user))
+            app.state.music.command(
+                body.action, body.value, guard=lambda: recheck_music_voice_access(app, request.state.user["id"])
+            )
         )
 
 
@@ -181,11 +210,13 @@ def register_queue_routes(app: FastAPI) -> None:
     @app.post("/api/music/queue", **options)
     async def enqueue(body: MusicTracksInput, request: Request) -> dict:
         music_voice_access(app, request.state.user)
+        reference = await app.state.db.run(saved_origin, body, request)
         return await player_result(
             app.state.music.enqueue(
                 tracks_for_player(body, request),
                 request.state.user,
-                guard=lambda: music_voice_access(app, request.state.user),
+                guard=lambda: recheck_music_voice_access(app, request.state.user["id"]),
+                saved_origin=reference,
             )
         )
 
@@ -193,19 +224,21 @@ def register_queue_routes(app: FastAPI) -> None:
     async def reorder(body: MusicOrderInput, request: Request) -> dict:
         music_voice_access(app, request.state.user)
         return await player_result(
-            app.state.music.reorder(body.ids, guard=lambda: music_voice_access(app, request.state.user))
+            app.state.music.reorder(body.ids, guard=lambda: recheck_music_voice_access(app, request.state.user["id"]))
         )
 
     @app.delete("/api/music/queue", **options)
     async def clear(request: Request) -> dict:
         music_voice_access(app, request.state.user)
-        return await player_result(app.state.music.clear(guard=lambda: music_voice_access(app, request.state.user)))
+        return await player_result(
+            app.state.music.clear(guard=lambda: recheck_music_voice_access(app, request.state.user["id"]))
+        )
 
     @app.delete("/api/music/queue/{entry_id}", **options)
     async def remove(entry_id: str, request: Request) -> dict:
         music_voice_access(app, request.state.user)
         return await player_result(
-            app.state.music.remove(entry_id, guard=lambda: music_voice_access(app, request.state.user))
+            app.state.music.remove(entry_id, guard=lambda: recheck_music_voice_access(app, request.state.user["id"]))
         )
 
 
@@ -249,10 +282,9 @@ def register_playlist_routes(app: FastAPI) -> None:
         changes = body.model_dump(exclude_none=True)
         if body.tracks:
             tracks_for_player(MusicTracksInput(tracks=body.tracks), request)
-        result = await app.state.db.run(app.state.music_store.update, playlist_id, request.state.user, changes)
+        await app.state.db.run(app.state.music_store.update, playlist_id, request.state.user, changes)
         app.state.music_cache.refresh()
-        app.state.events.publish("music_playlists")
-        return result
+        return await app.state.db.run(publish_saved_playlist, app, playlist_id, request.state.user)
 
     @app.delete("/api/music/playlists/{playlist_id}", **options)
     async def delete(playlist_id: str, request: Request) -> dict:
@@ -265,7 +297,7 @@ def register_playlist_routes(app: FastAPI) -> None:
     async def retry_cache(playlist_id: str, request: Request) -> dict:
         row = await app.state.db.run(app.state.music_store.playlist, playlist_id)
         app.state.music_store.editable(row, request.state.user)
-        app.state.music_cache.retry(row["tracks"])
+        await app.state.music_cache.retry_verified(row["tracks"])
         return {"ok": True}
 
     @app.get("/api/music/playlists/{playlist_id}/cache", **options)
@@ -293,7 +325,10 @@ def register_playlist_playback(app: FastAPI) -> None:
         _, tracks = await playable(playlist_id, request)
         return await player_result(
             app.state.music.enqueue(
-                tracks, request.state.user, guard=lambda: music_voice_access(app, request.state.user)
+                tracks,
+                request.state.user,
+                guard=lambda: recheck_music_voice_access(app, request.state.user["id"]),
+                saved_origin={"playlist_id": playlist_id, "owner_id": request.state.user["id"]},
             )
         )
 
@@ -305,6 +340,6 @@ def register_playlist_playback(app: FastAPI) -> None:
                 tracks,
                 request.state.user,
                 {"id": row["id"], "name": row["name"]},
-                guard=lambda: music_voice_access(app, request.state.user),
+                guard=lambda: recheck_music_voice_access(app, request.state.user["id"]),
             )
         )

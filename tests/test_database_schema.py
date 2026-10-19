@@ -178,3 +178,76 @@ def test_failed_sqlite_initialization_closes_connection(tmp_path: Path) -> None:
         Database(path)
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         connection.execute("SELECT 1")
+
+
+def test_sqlite_media_upgrade_preserves_legacy_data_and_markers(tmp_path: Path) -> None:
+    path = tmp_path / "media.sqlite3"
+    database = Database(path)
+    database.execute(
+        "INSERT INTO sources(id,url,title,duration,created_at) VALUES (?,?,?,?,?)",
+        ("source", "https://example.com", "Original", 10, 1),
+    )
+    identity = database.add_job("https://example.com")
+    database.set_setting("app_settings", {"max_storage_bytes": 321})
+    database.set_setting(SCHEMA_VERSION_KEY, 1)
+    database.execute("ALTER TABLE sources DROP COLUMN media_available")
+    for column in ("downloaded_bytes", "total_bytes", "total_estimated"):
+        database.execute("ALTER TABLE jobs DROP COLUMN " + column)
+    database.execute("DROP TABLE media_usage")
+    database.close()
+    restored = Database(path)
+    assert restored.one("SELECT title,media_available FROM sources") == {"title": "Original", "media_available": 1}
+    assert restored.one("SELECT downloaded_bytes,total_bytes FROM jobs WHERE id=?", (identity,)) == {
+        "downloaded_bytes": 0,
+        "total_bytes": None,
+    }
+    assert restored.setting("app_settings") == {"max_storage_bytes": 321}
+    assert restored.setting("activity_totals_initialized") is True
+    assert restored.setting("sound_play_totals_initialized") is True
+    assert restored.rows("SELECT * FROM media_usage") == []
+    restored.close()
+
+
+@pytest.mark.parametrize(
+    ("legacy", "expected"),
+    [
+        ({}, {}),
+        ({"play_outside_voice": True}, {"outside_voice_control": True}),
+        ({"always_live_conversation": True}, {"outside_voice_control": True}),
+        ({"play_outside_voice": False}, {"outside_voice_control": False}),
+        (
+            {"play_outside_voice": False, "always_live_conversation": True},
+            {"outside_voice_control": True},
+        ),
+        (
+            {"play_outside_voice": True, "outside_voice_control": False},
+            {"outside_voice_control": False},
+        ),
+    ],
+)
+def test_voice_permissions_migrate_once_without_changing_other_data(
+    tmp_path: Path, legacy: dict, expected: dict
+) -> None:
+    path = tmp_path / "permissions.sqlite3"
+    database = Database(path)
+    database.execute(
+        "INSERT INTO users(id,username,display_name,created_at,last_login,permission_overrides) "
+        "VALUES ('100','member','Member',1,2,?)",
+        (json.dumps({**legacy, "play_sounds": False}),),
+    )
+    database.set_setting(SCHEMA_VERSION_KEY, 2)
+    database.set_setting("retained_queue", ["first", "second"])
+    database.close()
+    database = Database(path)
+    account = database.one("SELECT * FROM users WHERE id='100'")
+    assert json.loads(account["permission_overrides"]) == {**expected, "play_sounds": False}
+    assert account["last_login"] == 2
+    assert database.setting("retained_queue") == ["first", "second"]
+    assert database.setting("activity_totals_initialized") is True
+    assert database.setting("sound_play_totals_initialized") is True
+    assert database.setting(SCHEMA_VERSION_KEY) == SCHEMA_VERSION
+    database.execute("UPDATE users SET permission_overrides='{}' WHERE id='100'")
+    database.close()
+    database = Database(path)
+    assert database.one("SELECT permission_overrides FROM users WHERE id='100'")["permission_overrides"] == "{}"
+    database.close()

@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS sources (
                     id TEXT PRIMARY KEY, url TEXT NOT NULL, title TEXT NOT NULL,
                     duration REAL NOT NULL, created_at REAL NOT NULL
-                , media_id TEXT, importer_id TEXT REFERENCES users(id));
+                , media_id TEXT, media_available INTEGER NOT NULL DEFAULT 1, importer_id TEXT REFERENCES users(id));
 
 CREATE TABLE IF NOT EXISTS clips (
                     id TEXT PRIMARY KEY, source_id TEXT REFERENCES sources(id),
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY, url TEXT NOT NULL, status TEXT NOT NULL,
                     progress REAL NOT NULL DEFAULT 0, error TEXT,
                     source_id TEXT, created_at REAL NOT NULL
-                , actor_id TEXT REFERENCES users(id), title TEXT);
+                , actor_id TEXT REFERENCES users(id), title TEXT, downloaded_bytes BIGINT NOT NULL DEFAULT 0, total_bytes BIGINT, total_estimated INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
@@ -142,3 +142,5 @@ CREATE TABLE IF NOT EXISTS sound_play_totals (
     resource_id TEXT NOT NULL, actor_id TEXT NOT NULL, guild_id TEXT NOT NULL,
     played BIGINT NOT NULL DEFAULT 0, PRIMARY KEY(resource_id,actor_id,guild_id)
 );
+
+CREATE TABLE IF NOT EXISTS media_usage (resource_id TEXT PRIMARY KEY, last_used DOUBLE PRECISION NOT NULL);

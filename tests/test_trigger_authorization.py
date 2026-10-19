@@ -41,12 +41,12 @@ def test_actions_outside_creator_keeps_participant_eligibility(tmp_path: Path, k
         value.db.execute("UPDATE clips SET creator_id='300' WHERE id='sound'")
         value.db.execute(
             "UPDATE users SET permission_overrides=? WHERE id='100'",
-            ('{"view_actions":true,"play_outside_voice":false,"edit_all_sounds":false}',),
+            ('{"view_actions":true,"outside_voice_control":false,"edit_all_sounds":false}',),
         )
         saved = rule(value, event=kind, action=action, clip_id="sound" if action == "play" else "", delay=0.01)
         if kind == "leave":
             value.bot.voice.channel.members = []
-        assert not value.playback.permitted("100", ("play_outside_voice",))
+        assert not value.playback.permitted("100", ("outside_voice_control",))
         await value.run(saved, event(value, actor="200", kind=kind))
         assert value.db.one("SELECT outcome FROM audit WHERE action='action_trigger.fire'")["outcome"] == "success"
         if action == "play":
@@ -115,7 +115,7 @@ def test_conversation_outside_creator_and_eligibility(tmp_path: Path, failure: s
             "INSERT INTO users(id,username,display_name,created_at,last_login) VALUES ('300','uploader','Uploader',0,0)"
         )
         db.execute("UPDATE clips SET creator_id='300' WHERE id='sound'")
-        db.execute("UPDATE users SET permission_overrides=? WHERE id='100'", ('{"play_outside_voice":false}',))
+        db.execute("UPDATE users SET permission_overrides=? WHERE id='100'", ('{"outside_voice_control":false}',))
         value = manager(db)
         _, participant = participant_setup(value.bot)
         await value.synchronize()

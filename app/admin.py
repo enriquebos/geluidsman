@@ -88,7 +88,7 @@ def register_admin_routes(app: FastAPI) -> None:
         if not values["kirby"]:
             app.state.bot.state.kirby.clear()
         await app.state.db.run(app.state.db.audit, request.state.user["id"], "fun.update", details=values)
-        app.state.events.publish("fun.settings", values)
+        app.state.events.publish("fun.settings", {**values, "resource": "/state/fun", "value": {"fun": values}})
         app.state.events.publish("audit")
         return values
 
@@ -122,6 +122,7 @@ def register_admin_routes(app: FastAPI) -> None:
         return {
             "permissions": [{"id": key, "label": label, "group": group} for key, label, group in CATALOGUE],
             "defaults": DEFAULTS,
+            "admin_defaults": effective_permissions({}, admin=True),
         }
 
     @app.get("/api/admin/users", **options)

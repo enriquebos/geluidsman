@@ -119,18 +119,49 @@ def download_captions(downloader: GuardedDownloader, info: dict, folder: Path) -
     return tracks
 
 
+class DownloadProgress:
+    def __init__(self, maximum: int) -> None:
+        self.maximum = maximum
+        self.expected = {}
+        self.transferred = {}
+
+    def configure(self, info: dict) -> None:
+        self.expected = {
+            str(item.get("format_id") or "default"): (
+                item.get("filesize") or item.get("filesize_approx"),
+                not bool(item.get("filesize")),
+            )
+            for item in info.get("requested_formats") or [info]
+        }
+
+    def __call__(self, data: JsonObject) -> None:
+        identity = str(data.get("info_dict", {}).get("format_id") or "default")
+        self.transferred[identity] = data.get("downloaded_bytes", 0)
+        total = data.get("total_bytes") or data.get("total_bytes_estimate")
+        self.expected[identity] = (total, not bool(data.get("total_bytes")))
+        size = sum(self.transferred.values())
+        total = (
+            sum(item[0] for item in self.expected.values()) if all(item[0] for item in self.expected.values()) else None
+        )
+        if size > self.maximum or (total and total > self.maximum):
+            message = "Download exceeds size limit."
+            raise ValueError(message)
+        emit(
+            {
+                "progress": min(1, size / total) if total else 0,
+                "downloaded_bytes": size,
+                "total_bytes": total,
+                "total_estimated": bool(total) and any(item[1] for item in self.expected.values()),
+            }
+        )
+
+
 def run() -> None:
     url, destination, proxy, max_duration, max_bytes, runtime = sys.argv[1:7]
     folder = Path(destination)
     max_duration, max_bytes = float(max_duration), int(max_bytes)
 
-    def progress(data: JsonObject) -> None:
-        total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
-        size = data.get("downloaded_bytes", 0)
-        if size > max_bytes or (total and total > max_bytes):
-            msg = "Download exceeds size limit."
-            raise ValueError(msg)
-        emit({"progress": min(0.9, size / total * 0.9) if total else 0.05})
+    progress = DownloadProgress(max_bytes)
 
     options = {
         "proxy": proxy,
@@ -168,6 +199,7 @@ def run() -> None:
             emit({"title": str(info.get("title") or "Untitled video")[:300]})
         validate_info(info, max_duration)
 
+        progress.configure(info)
         downloader.process_info(info)
         tracks = download_captions(downloader, info, folder)
         paths = [

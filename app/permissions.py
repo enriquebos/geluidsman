@@ -16,8 +16,8 @@ CATALOGUE = [
     ("long_sounds", "Create and upload sounds up to 10 minutes", "Sounds"),
     ("high_volume", "Boost sound volume to 1000%", "Sounds"),
     ("play_sounds", "Play sounds", "Soundboard"),
-    ("play_outside_voice", "Play sounds outside the voice channel", "Soundboard"),
     ("stop_sounds", "Stop sounds and stop-all", "Soundboard"),
+    ("outside_voice_control", "Use Geluidsman outside voice", "Voice"),
     ("connect_voice", "Connect or move the bot", "Voice"),
     ("disconnect_voice", "Disconnect the bot", "Voice"),
     ("master_volume", "Change master volume", "Voice"),
@@ -32,7 +32,6 @@ CATALOGUE = [
     ("manage_imports", "Manage import jobs", "Library"),
     ("delete_videos", "Delete videos", "Library"),
     ("view_conversations", "Access Conversation page", "Conversation"),
-    ("always_live_conversation", "Always see live conversation", "Conversation"),
     ("control_recording", "Enable or disable recording", "Conversation"),
     ("manage_triggers", "Manage sound triggers", "Conversation"),
     ("view_actions", "Access Actions page", "Actions"),
@@ -49,8 +48,7 @@ DEFAULTS = {
         "master_volume",
         "import_channels",
         "control_recording",
-        "always_live_conversation",
-        "play_outside_voice",
+        "outside_voice_control",
     }
     for key, _label, _group in CATALOGUE
 }
@@ -58,7 +56,9 @@ DEFAULTS = {
 
 def effective_permissions(overrides: dict, *, admin: bool = False) -> dict[str, bool]:
     return {
-        key: True if admin and key == "admin" else overrides.get(key, True if admin else default)
+        key: True
+        if admin and key == "admin"
+        else overrides.get(key, True if admin and key != "outside_voice_control" else default)
         for key, default in DEFAULTS.items()
     }
 
@@ -95,7 +95,7 @@ def require_sound_permission(action: Literal["edit", "delete"]) -> Callable[[Req
     return verify
 
 
-def can_play_in_channel(user_id: str, permissions: dict, channel: object) -> bool:
-    return permissions.get("play_outside_voice", False) or any(
-        str(member.id) == user_id for member in getattr(channel, "members", [])
+def can_use_voice_channel(user_id: str, permissions: dict, channel: object) -> bool:
+    return permissions.get("outside_voice_control", False) or any(
+        str(member.id) == user_id and not getattr(member, "bot", False) for member in getattr(channel, "members", [])
     )

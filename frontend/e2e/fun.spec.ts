@@ -1,8 +1,24 @@
 import { readFileSync } from 'node:fs'
 import ts from 'typescript'
-import { test, expect } from '@playwright/test'
+import { test, expect, Route } from '@playwright/test'
+import type { State } from '../src/types'
 
 
+
+const stateReads = /\/api\/(?:state(?:\/(?:fun|sounds|library|interface|editor-options))?|playback)(?:\?.*)?$/
+function domainState(route: Route, state: State) {
+  const path = new URL(route.request().url()).pathname
+  if (path === '/api/playback') return { status: state.status }
+  if (path === '/api/state/fun') return { fun: state.fun }
+  if (path === '/api/state/sounds') return { clips: state.clips }
+  if (path === '/api/state/library') return { clips: state.clips, sources: state.sources, limits: state.limits }
+  if (path === '/api/state/interface') return { user: state.user, channels: state.channels, emojis: state.emojis, build_id: state.build_id }
+  if (path === '/api/state/editor-options') return { user: state.user, emojis: state.emojis, tags: [], max_clip_seconds: state.limits.max_clip_seconds }
+  return state
+}
+
+
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'wait' }) })
 
 test('Fun tab saves instantly and preserves console across tabs and reload', async ({ page }, testInfo) => {
 
@@ -18,9 +34,11 @@ test('Fun tab saves instantly and preserves console across tabs and reload', asy
 
   await page.goto('/admin?tab=fun')
 
-  await expect(page.getByRole('tab', { name: 'Fun', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Fun', exact: true })).toHaveAttribute('aria-current', 'page')
 
+  await page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Application console', exact: true }).click()
   await page.getByRole('checkbox', { name: 'Follow latest' }).uncheck()
+  await page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Fun', exact: true }).click()
 
   await page.getByRole('switch', { name: 'Flashbang', exact: true }).check()
 
@@ -62,13 +80,15 @@ test('Fun tab saves instantly and preserves console across tabs and reload', asy
 
   await expect.poll(() => settings.kirby_window).toBe(8)
 
+  await expect(page.getByLabel('Within seconds')).toHaveValue('8')
+  await expect(page.getByRole('switch', { name: 'DVD screensaver', exact: true })).toBeEnabled()
   const speedBox = await page.getByLabel('DVD speed').boundingBox()
 
   const toggleBox = await page.getByRole('switch', { name: 'DVD screensaver', exact: true }).boundingBox()
 
   expect(speedBox!.x + speedBox!.width).toBeLessThan(toggleBox!.x)
 
-  await page.getByRole('tab', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Application console', exact: true }).click()
 
   await expect(page.getByRole('checkbox', { name: 'Follow latest' })).not.toBeChecked()
 
@@ -114,7 +134,7 @@ test('effects use playback events, flash after 600ms, and DVD is independent', a
 
   })
 
-  await page.route('**/api/state*', async route => { const response = await route.fetch(); const state = await response.json(); state.fun = { flashbang: true, vine_boom: true, dvd: true, sus: true, dvd_speed: 1 }; Object.assign(state.status, { connected: true, channel_id: '123', participants: [{ id: '100', name: 'Test Member', avatar: null }] }); await route.fulfill({ response, json: state }) })
+  await page.route(stateReads, async route => { const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json(); state.fun = { flashbang: true, vine_boom: true, dvd: true, sus: true, dvd_speed: 1 }; Object.assign(state.status, { connected: true, channel_id: '123', participants: [{ id: '100', name: 'Test Member', avatar: null }] }); await route.fulfill({ response, json: domainState(route, state) }) })
 
   await page.goto('/soundboard')
 
@@ -178,19 +198,19 @@ test('broadcast reaches PC and phone viewers in voice despite different device c
 
       if (index === 1) await page.addInitScript(() => { const original = Date.now; Date.now = () => original() + 120000 })
 
-      await page.route('**/api/state*', async route => {
+      await page.route(stateReads, async route => {
 
-        const response = await route.fetch(); const state = await response.json()
+        const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json()
 
         state.fun = { flashbang: true, vine_boom: true, dvd: true, sus: true, dvd_speed: 1 }
 
         Object.assign(state.status, { connected: true, channel_id: '123', participants: index < 2 ? [{ id: '100', name: 'Test Member', avatar: null }] : [] })
 
-        await route.fulfill({ response, json: state })
+        await route.fulfill({ response, json: domainState(route, state) })
 
       })
 
-      await page.route('**/api/events', async route => { await route.fulfill({ contentType: 'text/event-stream', body: await message }) })
+      await page.route('**/api/events**', async route => { await route.fulfill({ contentType: 'text/event-stream', body: await message }) })
 
       await page.goto('/soundboard')
 
@@ -218,7 +238,7 @@ test('broadcast reaches PC and phone viewers in voice despite different device c
 
     await expect(pages[2].locator('.fun-dvd')).toBeVisible()
 
-  } finally { for (const context of contexts) await context.close() }
+  } finally { broadcast(''); for (const page of pages) await page.unrouteAll({ behavior: 'wait' }); for (const context of contexts) await context.close() }
 
 })
 
@@ -246,9 +266,9 @@ test('goose wanders independently and Kirby restores cards after its account pau
 
   })
 
-  await page.route('**/api/state*', async route => {
+  await page.route(stateReads, async route => {
 
-    const response = await route.fetch(); const state = await response.json()
+    const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json()
 
     state.fun = { ...state.fun, goose: true, kirby: true }
 
@@ -256,7 +276,7 @@ test('goose wanders independently and Kirby restores cards after its account pau
 
     state.kirby_remaining_ms = 0
 
-    await route.fulfill({ response, json: state })
+    await route.fulfill({ response, json: domainState(route, state) })
 
   })
 
@@ -320,13 +340,13 @@ test('goose wanders independently and Kirby restores cards after its account pau
 
 test('Kirby restores pause on reload', async ({ page }) => {
 
-  await page.route('**/api/state*', async route => {
+  await page.route(stateReads, async route => {
 
-    const response = await route.fetch(); const state = await response.json()
+    const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json()
 
     state.fun = { ...state.fun, kirby: true }; state.kirby_remaining_ms = 4000
 
-    await route.fulfill({ response, json: state })
+    await route.fulfill({ response, json: domainState(route, state) })
 
   })
 
@@ -354,11 +374,11 @@ test('repeated sound effects overlap, deduplicate and expire independently', asy
       }
     }
   })
-  await page.route('**/api/state*', async route => {
-    const response = await route.fetch(); const state = await response.json()
+  await page.route(stateReads, async route => {
+    const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json()
     state.fun = { ...state.fun, flashbang: true, sus: true, vine_boom: true }
     Object.assign(state.status, { connected: true, channel_id: '123', participants: [{ id: '100', name: 'Test Member', avatar: null }] })
-    await route.fulfill({ response, json: state })
+    await route.fulfill({ response, json: domainState(route, state) })
   })
   await page.goto('/soundboard')
   await expect(page.getByLabel('Search sounds')).toBeVisible()
@@ -383,10 +403,10 @@ test('repeated sound effects overlap, deduplicate and expire independently', asy
 
 test('off-screen goose wanders immediately and draws temporary red ink', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'Goose is hidden on touch-only devices')
-  await page.route('**/api/state*', async route => {
-    const response = await route.fetch(); const state = await response.json()
+  await page.route(stateReads, async route => {
+    const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json()
     state.fun = { ...state.fun, goose: true }
-    await route.fulfill({ response, json: state })
+    await route.fulfill({ response, json: domainState(route, state) })
   })
   await page.goto('/soundboard')
   await expect(page.getByLabel('Search sounds')).toBeVisible()
@@ -442,10 +462,10 @@ test('off-screen goose wanders immediately and draws temporary red ink', async (
 for (const [random, kind] of [[0.3, 'smiley'], [0.95, 'shrek'], [0.05, 'random'], [0.7, 'word']] as const) {
   test(`goose drawing preserves strokes and bounds with seed ${random}`, async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== 'desktop', 'Goose is hidden on touch-only devices')
-    await page.route('**/api/state*', async route => {
-      const response = await route.fetch(); const state = await response.json()
+    await page.route(stateReads, async route => {
+      const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json()
       state.fun = { ...state.fun, goose: true }
-      await route.fulfill({ response, json: state })
+      await route.fulfill({ response, json: domainState(route, state) })
     })
     await page.goto('/soundboard')
     await expect(page.getByLabel('Search sounds')).toBeVisible()
@@ -489,11 +509,11 @@ test('Kirby ignores duplicate pause updates and removes all inhale visuals on ex
       }
     }
   })
-  await page.route('**/api/state*', async route => {
-    const response = await route.fetch(); const state = await response.json()
+  await page.route(stateReads, async route => {
+    const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json()
     state.fun = { ...state.fun, kirby: true }; state.kirby_remaining_ms = 0
     state.clips = [{ id: 'test', name: 'Keep my sound', emoji: '🎵', tags: [], start: 0, end: 1, volume: 1, source_id: null }]
-    await route.fulfill({ response, json: state })
+    await route.fulfill({ response, json: domainState(route, state) })
   })
   await page.goto('/soundboard')
   await expect(page.locator('.sound-card').first()).toBeVisible()
@@ -523,10 +543,10 @@ test('Kirby ignores duplicate pause updates and removes all inhale visuals on ex
 
 test('goose jumps keep their whole body inside the top viewport boundary', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'Goose is hidden on touch-only devices')
-  await page.route('**/api/state*', async route => {
-    const response = await route.fetch(); const state = await response.json()
+  await page.route(stateReads, async route => {
+    const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json()
     state.fun = { ...state.fun, goose: true }
-    await route.fulfill({ response, json: state })
+    await route.fulfill({ response, json: domainState(route, state) })
   })
   await page.goto('/soundboard')
   await expect(page.getByLabel('Search sounds')).toBeVisible()
@@ -556,11 +576,11 @@ for (const [random, behavior] of [[.65, 'steal'], [.74, 'inspect'], [.82, 'trip'
         }
       }
     })
-    await page.route('**/api/state*', async route => {
-      const response = await route.fetch(); const state = await response.json()
+    await page.route(stateReads, async route => {
+      const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json()
       state.fun = { ...state.fun, goose: true, dvd: behavior === 'fight' }
       state.clips = [{ id: 'test', name: 'Borrow my emoji', emoji: '🎵', tags: [], start: 0, end: 1, volume: 1, source_id: null }]
-      await route.fulfill({ response, json: state })
+      await route.fulfill({ response, json: domainState(route, state) })
     })
     await page.goto('/soundboard')
     await page.locator('.sound-card').first().scrollIntoViewIfNeeded()
@@ -626,10 +646,10 @@ for (const [random, behavior] of [[.65, 'steal'], [.74, 'inspect'], [.82, 'trip'
 test('cursor interest has bounded chases, cooldowns, leave cancellation and visible-time scheduling', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'Goose is hidden on touch-only devices')
   await page.addInitScript(() => { Math.random = () => .5 })
-  await page.route('**/api/state*', async route => {
-    const response = await route.fetch(); const state = await response.json()
+  await page.route(stateReads, async route => {
+    const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json()
     state.fun = { ...state.fun, goose: true }
-    await route.fulfill({ response, json: state })
+    await route.fulfill({ response, json: domainState(route, state) })
   })
   await page.goto('/soundboard')
   await expect(page.getByLabel('Search sounds')).toBeVisible()
@@ -690,11 +710,11 @@ test('disabling goose during borrowing restores the emoji and removes props', as
       }
     }
   })
-  await page.route('**/api/state*', async route => {
-    const response = await route.fetch(); const state = await response.json()
+  await page.route(stateReads, async route => {
+    const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json()
     state.fun = { ...state.fun, goose: true }
     state.clips = [{ id: 'test', name: 'Borrow my emoji', emoji: '🎵', tags: [], start: 0, end: 1, volume: 1, source_id: null }]
-    await route.fulfill({ response, json: state })
+    await route.fulfill({ response, json: domainState(route, state) })
   })
   await page.goto('/soundboard')
   await page.locator('.sound-card').first().scrollIntoViewIfNeeded()
@@ -716,10 +736,10 @@ test('disabling goose during borrowing restores the emoji and removes props', as
 test('a stationary cursor gets a brief investigation rather than permanent following', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'Goose is hidden on touch-only devices')
   await page.addInitScript(() => { Math.random = () => .05 })
-  await page.route('**/api/state*', async route => {
-    const response = await route.fetch(); const state = await response.json()
+  await page.route(stateReads, async route => {
+    const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json()
     state.fun = { ...state.fun, goose: true }
-    await route.fulfill({ response, json: state })
+    await route.fulfill({ response, json: domainState(route, state) })
   })
   await page.goto('/soundboard')
   await expect(page.getByLabel('Search sounds')).toBeVisible()
@@ -739,7 +759,7 @@ test('a stationary cursor gets a brief investigation rather than permanent follo
 
 test('weighted goose activities vary, inspect drawings and align cross-out pencils', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'Goose is hidden on touch-only devices')
-  await page.route('**/api/state*', async route => { const response = await route.fetch(); const state = await response.json(); state.fun = { ...state.fun, goose: true }; await route.fulfill({ response, json: state }) })
+  await page.route(stateReads, async route => { const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json(); state.fun = { ...state.fun, goose: true }; await route.fulfill({ response, json: domainState(route, state) }) })
   await page.goto('/soundboard')
   await expect(page.getByLabel('Search sounds')).toBeVisible()
   await page.clock.install()
@@ -778,7 +798,7 @@ test('weighted goose activities vary, inspect drawings and align cross-out penci
 test('failed cursor chases skid and inspect without clicking or immediate rechasing', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'Goose is hidden on touch-only devices')
   await page.addInitScript(() => { Math.random = () => .5 })
-  await page.route('**/api/state*', async route => { const response = await route.fetch(); const state = await response.json(); state.fun = { ...state.fun, goose: true }; await route.fulfill({ response, json: state }) })
+  await page.route(stateReads, async route => { const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json(); state.fun = { ...state.fun, goose: true }; await route.fulfill({ response, json: domainState(route, state) }) })
   await page.goto('/soundboard')
   await expect(page.getByLabel('Search sounds')).toBeVisible()
   await page.clock.install()
@@ -813,7 +833,7 @@ test('goose nap ignores progress and duplicate IDs but wakes for a new playback'
     const Original = window.EventSource
     window.EventSource = class extends Original { constructor(url: string | URL, options?: EventSourceInit) { super(url, options); window.addEventListener('test-nap-event', event => this.dispatchEvent(new MessageEvent((event as CustomEvent).detail, { data: JSON.stringify({ positions: { 'already-playing': 1 } }) }))) } }
   })
-  await page.route('**/api/state*', async route => { const response = await route.fetch(); const state = await response.json(); state.fun = { ...state.fun, goose: true }; state.status.playbacks = [{ id, clip_id: 'test', name: 'Ongoing', position: 0, duration: 600, started_at: Date.now() / 1000 }]; await route.fulfill({ response, json: state }) })
+  await page.route(stateReads, async route => { const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json(); state.fun = { ...state.fun, goose: true }; state.status.playbacks = [{ id, clip_id: 'test', name: 'Ongoing', position: 0, duration: 600, started_at: Date.now() / 1000 }]; await route.fulfill({ response, json: domainState(route, state) }) })
   await page.route('**/api/playback', async route => { const response = await route.fetch(); const data = await response.json(); data.status.snapshot_at = Date.now() / 1000; data.status.playbacks = [{ id, clip_id: 'test', name: 'Ongoing', position: 0, duration: 600, started_at: Date.now() / 1000 }]; await route.fulfill({ response, json: data }) })
   await page.goto('/soundboard')
   await expect(page.getByLabel('Search sounds')).toBeVisible()
@@ -838,7 +858,7 @@ test('goose reacts only to eligible effects and discards reactions during drawin
     const Original = window.EventSource
     window.EventSource = class extends Original { constructor(url: string | URL, options?: EventSourceInit) { super(url, options); window.addEventListener('test-personality-event', event => this.dispatchEvent(new MessageEvent('fun.play', { data: JSON.stringify((event as CustomEvent).detail) }))) } }
   })
-  await page.route('**/api/state*', async route => { const response = await route.fetch(); const state = await response.json(); state.fun = { ...state.fun, goose: true, flashbang: true, vine_boom: true, sus: true }; Object.assign(state.status, { connected: true, channel_id: '123', participants: [{ id: '100', name: 'Test Member', avatar: null }] }); await route.fulfill({ response, json: state }) })
+  await page.route(stateReads, async route => { const response = await route.fetch({ url: new URL('/api/state', route.request().url()).href }); const state = await response.json(); state.fun = { ...state.fun, goose: true, flashbang: true, vine_boom: true, sus: true }; Object.assign(state.status, { connected: true, channel_id: '123', participants: [{ id: '100', name: 'Test Member', avatar: null }] }); await route.fulfill({ response, json: domainState(route, state) }) })
   await page.goto('/soundboard')
   await expect(page.getByLabel('Search sounds')).toBeVisible()
   await page.clock.install()
@@ -942,16 +962,17 @@ test('Goose admin tab sends bounded text and clients display escaped transient b
   let sent = ''
   await page.route('**/api/admin/goose/message', route => { sent = route.request().postDataJSON().text; return route.fulfill({ json: { sent: true } }) })
   await page.goto('/admin?tab=goose')
-  await expect(page.getByRole('tab', { name: 'Goose', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Goose', exact: true })).toHaveAttribute('aria-current', 'page')
   const input = page.getByLabel('Message', { exact: true })
   await expect(input).toHaveAttribute('maxlength', '30')
   await input.fill('Hello everyone')
   await input.press('Enter')
   expect(sent).toBe('Hello everyone')
   await expect(page.locator('.toast')).toContainText('Goose message sent')
+  await expect(page.getByRole('status', { name: 'Goose action status', exact: true })).toHaveText('Sent to connected viewers.')
   await expect(input).toHaveValue('')
   await page.reload()
-  await expect(page.getByRole('tab', { name: 'Goose', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Goose', exact: true })).toHaveAttribute('aria-current', 'page')
   await page.clock.install()
   await page.evaluate(() => window.dispatchEvent(new Event('test-goose-message')))
   await expect(page.locator('.goose-broadcast')).toContainText('<b>Honk</b>')

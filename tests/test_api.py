@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import subprocess
 import time
 import wave
@@ -121,7 +122,7 @@ def test_import_validation_busy_limits_and_retry(client: TestClient) -> None:
     assert client.post(f"/api/imports/{job}/retry").status_code == 409
     assert client.post("/api/imports/missing/retry").status_code == 404
     client.app.state.db.execute("UPDATE jobs SET status='failed' WHERE id=?", (job,))
-    media.base_settings.max_storage_bytes = 1
+    media.budget.limit = 1
     folder = media.root / "source"
     folder.mkdir()
     (folder / "test").write_bytes(b"ab")
@@ -321,3 +322,25 @@ def test_sound_rankings_survive_audit_cleanup_and_restart(client: TestClient) ->
     )
     assert sum(row["played"] for row in rows) == 3
     assert next(row["played"] for row in rows if row["actor_id"] == "100") == 2
+
+
+def test_health_reports_database_failure_without_exposing_details(client: TestClient) -> None:
+    assert client.get("/api/health").json()["database"] == "available"
+    with patch.object(client.app.state.db, "one", side_effect=sqlite3.OperationalError("private database details")):
+        response = client.get("/api/health")
+        assert response.status_code == 503
+        assert response.json() == {"ok": False, "application": "geluidsman", "database": "unavailable"}
+        assert "private database details" not in response.text
+    assert client.get("/api/health").status_code == 200
+
+
+def test_storage_usage_distinguishes_sound_library_from_music(client: TestClient) -> None:
+    cache = client.app.state.music_cache
+    cache.used = 123_000_000
+    response = client.get("/api/settings/app")
+    assert response.status_code == 200
+    assert response.json()["music_storage"] == {
+        "used_bytes": 123_000_000,
+        "max_bytes": client.app.state.media.budget.limit,
+    }
+    assert response.json()["used_bytes"] == 0

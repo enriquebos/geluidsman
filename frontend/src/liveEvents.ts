@@ -1,4 +1,5 @@
 type Listener = (event: Event) => void
+export const liveClientId = Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('')
 let source: EventSource | null = null
 const subscribers = new Set<LiveEvents>()
 
@@ -26,7 +27,7 @@ class LiveEvents {
 }
 
 export function liveEvents() {
-  if (!source) source = new EventSource('/api/events')
+  if (!source) source = new EventSource(`/api/events?client_id=${liveClientId}`)
   const subscription = new LiveEvents()
   subscribers.add(subscription)
   return subscription

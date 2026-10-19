@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     max_import_bytes: int = Field(1_000_000_000, ge=1)
     max_storage_bytes: int = Field(10_000_000_000, ge=1)
     music_cache_max_bytes: int = Field(10_000_000_000, ge=1)
+    media_max_bytes: int | None = Field(None, ge=1)
     max_channel_videos: int = Field(2000, ge=1, le=10000)
     max_clip_seconds: float = Field(60, ge=0.1, le=300)
     max_playbacks: int = Field(8, ge=1, le=32)

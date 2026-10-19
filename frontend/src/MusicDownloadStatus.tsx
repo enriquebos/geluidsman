@@ -3,15 +3,18 @@ import { createPortal } from 'react-dom'
 import { CircleAlert, Clock3, Download, LoaderCircle } from 'lucide-react'
 import type { MusicCacheStatus } from './Music'
 
-export function MusicDownloadStatus({ cache, title }: { cache: MusicCacheStatus; title: string }) {
+export function MusicDownloadStatus({ cache, title, disabled = false }: { cache: MusicCacheStatus; title: string; disabled?: boolean }) {
   const [open, setOpen] = useState(false)
   const [position, setPosition] = useState({ top: 0, left: 0 })
   const trigger = useRef<HTMLButtonElement>(null)
   const tooltip = useRef<HTMLDivElement>(null)
   const id = useId()
-  const label = cache.state === 'cached' ? 'Downloaded' : cache.state === 'downloading' ? 'Downloading' : cache.state === 'failed' ? 'Download failed' : 'Waiting to download'
-  const message = cache.state === 'failed' ? cache.error || 'Download failed. Try downloading this recording again.' : cache.state === 'downloading' ? 'Downloading this recording in the background.' : cache.state === 'cached' ? 'Downloaded and ready to play.' : 'Waiting to download this recording.'
-  const Icon = cache.state === 'failed' ? CircleAlert : cache.state === 'downloading' ? LoaderCircle : cache.state === 'queued' ? Clock3 : Download
+  useLayoutEffect(() => { if (disabled) setOpen(false) }, [disabled])
+  const analysis = cache.normalization
+  const analysisFailed = analysis?.state === 'failed'
+  const label = analysisFailed ? 'Loudness analysis failed' : cache.state === 'not_downloaded' ? 'Not downloaded' : cache.state === 'checking' ? 'Checking download status' : cache.state === 'cached' ? 'Downloaded' : cache.state === 'downloading' ? 'Downloading' : cache.state === 'cancelled' ? 'Download paused' : cache.state === 'failed' ? 'Download failed' : 'Waiting to download'
+  const message = cache.state === 'not_downloaded' ? 'Save or play this song to download its recording.' : cache.state === 'checking' ? 'Checking current download status.' : analysisFailed ? analysis.error || 'Loudness analysis failed. Retry in Downloads.' : cache.state === 'cached' && analysis?.state === 'queued' ? 'Downloaded. Loudness analysis is queued; the current playback gain is unchanged.' : cache.state === 'cached' && analysis?.state === 'analyzing' ? 'Downloaded. Measuring loudness for the next playback.' : cache.state === 'cached' && analysis?.state === 'ready' ? `Downloaded. Loudness gain: ${analysis.gain_db?.toFixed(1)} dB, applied on the next playback.` : ['failed', 'cancelled'].includes(cache.state) ? cache.error || 'Download failed. Try downloading this recording again.' : cache.state === 'downloading' ? 'Downloading this recording in the background.' : cache.state === 'cached' ? 'Downloaded and ready to play.' : 'Waiting to download this recording.'
+  const Icon = analysisFailed || ['failed', 'cancelled'].includes(cache.state) ? CircleAlert : cache.state === 'downloading' ? LoaderCircle : cache.state === 'queued' ? Clock3 : Download
   useLayoutEffect(() => {
     if (!open) return
     const update = () => {
@@ -33,5 +36,5 @@ export function MusicDownloadStatus({ cache, title }: { cache: MusicCacheStatus;
     document.addEventListener('pointerdown', outside)
     return () => document.removeEventListener('pointerdown', outside)
   }, [open])
-  return <><button ref={trigger} type="button" className={`icon-button music-download-status ${cache.state}`} aria-label={`${label}: ${title}`} aria-describedby={open ? id : undefined} onPointerEnter={event => { if (event.pointerType !== 'touch') setOpen(true) }} onPointerLeave={() => { if (document.activeElement !== trigger.current) setOpen(false) }} onFocus={() => setOpen(true)} onBlur={() => setOpen(false)} onClick={() => setOpen(true)} onKeyDown={event => { if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); setOpen(false) } }}><Icon size={14} className={cache.state === 'downloading' ? 'spin' : undefined} /></button>{open && createPortal(<div ref={tooltip} id={id} role="tooltip" className="music-download-tooltip" style={position}>{message}</div>, document.body)}</>
+  return <><button ref={trigger} disabled={disabled} type="button" className={`icon-button music-download-status ${analysisFailed ? 'failed' : cache.state}`} aria-label={`${label}: ${title}`} aria-describedby={open ? id : undefined} onPointerEnter={event => { if (event.pointerType !== 'touch') setOpen(true) }} onPointerLeave={() => { if (document.activeElement !== trigger.current) setOpen(false) }} onFocus={() => setOpen(true)} onBlur={() => setOpen(false)} onClick={() => setOpen(true)} onKeyDown={event => { if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); setOpen(false) } }}><Icon size={14} className={cache.state === 'downloading' ? 'spin' : undefined} /></button>{open && !disabled && createPortal(<div ref={tooltip} id={id} role="tooltip" className="music-download-tooltip" style={position}>{message}</div>, document.body)}</>
 }

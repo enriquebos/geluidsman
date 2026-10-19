@@ -1,13 +1,14 @@
 import { useUnsavedWork } from './useUnsavedWork'
 import { ClipVolume } from './ClipVolume'
+import { AudioDropzone } from './AudioDropzone'
 import { useEffect, useRef, useState } from 'react'
-import { Headphones, LoaderCircle, Upload, X } from 'lucide-react'
+import { Headphones, LoaderCircle, X } from 'lucide-react'
 import { useDialogEscape } from './useDialogEscape'
 import { EmojiPicker } from './EmojiPicker'
 import { TagInput } from './TagInput'
 import { api, ServerEmoji } from './types'
 
-export function SoundUpload({ boosted, serverEmojis, tags: availableTags, maxSeconds, maxBytes, onClose, onLibrary, onSaved }: { boosted: boolean; serverEmojis?: ServerEmoji[]; tags: string[]; maxSeconds: number; maxBytes: number; onClose: () => void; onLibrary: () => void; onSaved: () => Promise<void> }) {
+export function SoundUpload({ boosted, previewVolume, serverEmojis, tags: availableTags, maxSeconds, maxBytes, onClose, onLibrary, onSaved }: { boosted: boolean; previewVolume: number; serverEmojis?: ServerEmoji[]; tags: string[]; maxSeconds: number; maxBytes: number; onClose: () => void; onLibrary: () => void; onSaved: () => Promise<void> }) {
   const [file, setFile] = useState<File | null>(null)
   const [name, setName] = useState('')
   const [emoji, setEmoji] = useState('')
@@ -15,10 +16,10 @@ export function SoundUpload({ boosted, serverEmojis, tags: availableTags, maxSec
   const [volume, setVolume] = useState(1)
   const [busy, setBusy] = useState(false)
   useUnsavedWork(busy || Boolean(file || name || emoji || tags.length || volume !== 1))
-  const [dragging, setDragging] = useState(false)
   const [error, setError] = useState('')
   const [preview, setPreview] = useState('')
-  const input = useRef<HTMLInputElement>(null)
+  const audio = useRef<HTMLAudioElement>(null)
+  useEffect(() => { if (audio.current) audio.current.volume = previewVolume }, [preview, previewVolume])
   useEffect(() => {
     if (!file) { setPreview(''); return }
     const url = URL.createObjectURL(file)
@@ -41,5 +42,5 @@ export function SoundUpload({ boosted, serverEmojis, tags: availableTags, maxSec
       await api(`/clips/upload?${params}`, 'POST', file)
       await onSaved()
     } catch (error) { setError((error as Error).message); setBusy(false) }
-  }}><fieldset className="sound-edit-fields" disabled={busy}><input ref={input} className="upload-file-input" type="file" accept=".ogg,.mp3,audio/ogg,audio/mpeg" aria-label="Audio file" onChange={event => { choose(Array.from(event.target.files || [])); event.target.value = '' }} /><button type="button" className={`audio-dropzone ${dragging ? 'dragging' : ''}`} onClick={() => input.current?.click()} onDragOver={event => { event.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={event => { event.preventDefault(); setDragging(false); choose(Array.from(event.dataTransfer.files)) }}><Upload size={28} /><strong>{file ? file.name : 'Drop your audio here'}</strong><span>{file ? 'Click or drop to choose another file' : 'or click to choose .ogg or .mp3'}</span><small>Up to {maxBytes / 1024 / 1024} MB · 0.1–{maxSeconds} seconds</small></button>{preview && <div className="upload-preview"><Headphones size={17} /><audio controls src={preview} aria-label="Preview uploaded audio" /></div>}<label>Sound name<input autoFocus required maxLength={255} value={name} onChange={event => setName(event.target.value)} /></label><EmojiPicker serverEmojis={serverEmojis} value={emoji} onChange={setEmoji} /><TagInput value={tags} onChange={setTags} available={availableTags} /><ClipVolume value={volume} boosted={boosted} onChange={setVolume} /></fieldset>{error && <p className="form-error" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary-button" disabled={busy || !file || !name.trim()}>{busy ? <><LoaderCircle size={17} className="spin" /> Saving sound…</> : 'Add to soundboard'}</button></div></form></section></div>
+  }}><fieldset className="sound-edit-fields" disabled={busy}><AudioDropzone file={file} disabled={busy} accept=".ogg,.mp3,audio/ogg,audio/mpeg" label="Audio file" hint="or click to choose .ogg or .mp3" limits={`Up to ${maxBytes / 1024 / 1024} MB · 0.1–${maxSeconds} seconds`} onChoose={choose} />{preview && <div className="upload-preview"><Headphones size={17} /><audio ref={audio} controls src={preview} aria-label="Preview uploaded audio" /></div>}<label>Sound name<input autoFocus required maxLength={255} value={name} onChange={event => setName(event.target.value)} /></label><EmojiPicker serverEmojis={serverEmojis} value={emoji} onChange={setEmoji} /><TagInput value={tags} onChange={setTags} available={availableTags} /><ClipVolume value={volume} boosted={boosted} onChange={setVolume} /></fieldset>{error && <p className="form-error" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Cancel</button><button className="primary-button" disabled={busy || !file || !name.trim()}>{busy ? <><LoaderCircle size={17} className="spin" /> Saving sound…</> : 'Add to soundboard'}</button></div></form></section></div>
 }

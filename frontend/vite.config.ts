@@ -14,5 +14,6 @@ export default defineConfig(({ command }) => {
       },
     }],
     server: { proxy: { '/api': 'http://127.0.0.1:8687' } },
+    build: { rollupOptions: { output: { manualChunks: { 'react-vendor': ['react', 'react-dom', 'react-dom/client'] } } } },
   }
 })

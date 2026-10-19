@@ -1,16 +1,19 @@
+import { useDebounced } from './navigationLoading'
 import { Emoji } from './Emoji'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronDown, Check, X } from 'lucide-react'
 
 export type SelectOption = { id: string; name: string; emoji?: string; avatar?: string | null; disabled?: boolean }
-export function SearchSelect({ label, value, options, onChange, placeholder = 'All', searchable = true, disabled = false, allowEmpty = true, values, onToggle, hideLabel = false }: { label: string; value: string; options: SelectOption[]; onChange: (value: string) => void; placeholder?: string; searchable?: boolean; disabled?: boolean; allowEmpty?: boolean; hideLabel?: boolean; values?: string[]; onToggle?: (id: string) => void }) {
+export function SearchSelect({ label, value, options, onChange, placeholder = 'All', searchable = true, disabled = false, allowEmpty = true, values, onToggle, hideLabel = false, searchDelay = 0 }: { label: string; value: string; options: SelectOption[]; onChange: (value: string) => void; placeholder?: string; searchable?: boolean; disabled?: boolean; allowEmpty?: boolean; hideLabel?: boolean; searchDelay?: number; values?: string[]; onToggle?: (id: string) => void }) {
   const [position, setPosition] = useState<{ top: number | 'auto'; bottom: number | 'auto'; left: number; width: number; maxHeight: number }>({ top: 0, bottom: 'auto', left: 0, width: 0, maxHeight: 300 })
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
+  const settledQuery = useDebounced(query, searchDelay)
+  const filter = searchDelay ? settledQuery : query
   const [active, setActive] = useState(0)
   const root = useRef<HTMLDivElement>(null)
   const selected = options.find(option => option.id === value)
-  const choices = [...(allowEmpty ? [{ id: '', name: placeholder }] : []), ...options].filter(option => `${option.name} ${option.id}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()))
+  const choices = [...(allowEmpty ? [{ id: '', name: placeholder }] : []), ...options].filter(option => `${option.name} ${option.id}`.toLocaleLowerCase().includes(filter.toLocaleLowerCase()))
   useEffect(() => {
     const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false) }
     document.addEventListener('pointerdown', outside)

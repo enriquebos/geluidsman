@@ -1,6 +1,6 @@
 import { useLayoutEffect } from 'react'
 
-const musicScrollAreas = '.music-main-pane,.music-library-list,.music-queue-content,.sidebar-members,[role="dialog"],[role="listbox"],[role="menu"]'
+const musicScrollAreas = '.music-main-pane,.music-library-list,.music-queue-content,.soundboard-main-pane,.soundboard-navigation-pane,.sidebar-members,[role="dialog"],[role="listbox"],[role="menu"]'
 
 export function useMusicScrollLock(active: boolean) {
   useLayoutEffect(() => {

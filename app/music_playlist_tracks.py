@@ -27,7 +27,15 @@ def edited_track(original: dict, body: PlaylistTrackUpdate, recording: dict | No
             track["original_title"] = track["title"]
         track["title"] = body.name
     if recording is not None:
-        track.update(youtube_id=recording["source_id"], youtube_title=recording["title"], match_locked=True)
+        if track.get("upload_id"):
+            track["duration"] = recording["duration"]
+        track.update(
+            youtube_id=recording["source_id"],
+            youtube_title=recording["title"],
+            match_locked=True,
+            upload_id=None,
+            upload_name=None,
+        )
         if track["provider"] == "youtube":
             track.update(
                 source_id=recording["source_id"],
@@ -47,7 +55,9 @@ async def edit_track(playlist_id: str, index: int, body: PlaylistTrackUpdate, re
         target, identity = source_target(body.source_url)
         cached = app.state.music_cache.recording(old) or {}
         selected = old.get("youtube_id") or cached.get("youtube_id")
-        if identity != (selected or (old["source_id"] if old["provider"] == "youtube" else None)):
+        if old.get("upload_id") or identity != (
+            selected or (old["source_id"] if old["provider"] == "youtube" else None)
+        ):
             try:
                 resolved = await app.state.music_sources.resolve(target)
             except MusicSourceError as error:
@@ -66,19 +76,43 @@ async def edit_track(playlist_id: str, index: int, body: PlaylistTrackUpdate, re
         raise HTTPException(422, "A song exceeds the configured source duration limit.")
     user = await app.state.auth.current(request)
     check_permission(user, "view_music")
-    result = await app.state.db.run(
-        app.state.music_store.update_track,
+    result = await app.state.music.edit_saved_source(
         playlist_id,
+        user["id"],
+        old,
         index,
-        user,
-        {"track": track, "expected_updated_at": body.expected_updated_at},
+        lambda: app.state.db.run(
+            app.state.music_store.update_track,
+            playlist_id,
+            index,
+            user,
+            {"track": track, "expected_updated_at": body.expected_updated_at},
+        ),
+        publish=lambda: app.state.db.run(publish_saved_playlist, app, playlist_id, user),
     )
     if recording is not None:
         await app.state.music_cache.replace(old, track)
     app.state.music_cache.refresh()
-    app.state.events.publish("music_playlists")
-    result["cache"] = [app.state.music_cache.status(item) for item in result["tracks"]]
     return result
+
+
+def publish_saved_playlist(app: FastAPI, playlist_id: str, user: dict) -> dict:
+    with app.state.db.lock:
+        result = (
+            app.state.music_store.liked(user) if playlist_id == "liked" else app.state.music_store.playlist(playlist_id)
+        )
+        result["cache"] = [app.state.music_cache.status(item) for item in result["tracks"]]
+        result["artwork"] = app.state.music_store.artwork([item.get("thumbnail") for item in result["tracks"]])
+        app.state.events.publish(
+            "music_likes" if playlist_id == "liked" else "music_playlists",
+            {
+                "ids": [playlist_id],
+                "resource": "/music/likes/playlist" if playlist_id == "liked" else "/music/playlists/" + playlist_id,
+                "value": result,
+                **({"user_id": user["id"]} if playlist_id == "liked" else {}),
+            },
+        )
+        return result
 
 
 def register_playlist_track_routes(app: FastAPI) -> None:
@@ -89,6 +123,12 @@ def register_playlist_track_routes(app: FastAPI) -> None:
         playlist_id: str, index: Annotated[int, Path(ge=0, lt=1000)], body: PlaylistTrackUpdate, request: Request
     ) -> dict:
         return await edit_track(playlist_id, index, body, request)
+
+    @app.patch("/api/music/likes/tracks/{index}", **options)
+    async def update_like(
+        index: Annotated[int, Path(ge=0, lt=1000)], body: PlaylistTrackUpdate, request: Request
+    ) -> dict:
+        return await edit_track("liked", index, body, request)
 
     @app.post("/api/music/playlists/{playlist_id}/tracks", **options)
     async def append(playlist_id: str, body: MusicTrackInput, request: Request) -> dict:

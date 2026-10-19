@@ -30,7 +30,10 @@ def test_library_membership_is_visible_and_updates_require_playlist_editing(clie
     saved = client.put(path, headers=owner, json={"track": song(), "saved": True})
     assert saved.status_code == 200
     assert saved.json()["track_count"] == 1
-    assert client.put(path, headers=owner, json={"track": song(title="Renamed"), "saved": True}).json() == saved.json()
+    repeated = client.put(path, headers=owner, json={"track": song(title="Renamed"), "saved": True}).json()
+    assert {key: value for key, value in repeated.items() if key != "cache"} == {
+        key: value for key, value in saved.json().items() if key != "cache"
+    }
     row = client.get(query, headers=member).json()["playlists"][0]
     assert row["saved"] is True
     assert "tracks" not in row
@@ -144,3 +147,29 @@ def test_intervening_connection_write_cannot_be_overwritten_by_internal_playlist
         assert store.playlist(playlist["id"])["tracks"] == [original, addition]
     finally:
         other.close()
+
+
+def test_library_choices_include_verified_artwork_and_membership_returns_full_playlist(client: TestClient) -> None:
+    owner = {"x-member": "200"}
+    playlist = client.post("/api/music/playlists", headers=owner, json={"name": "Art"}).json()
+    track = song(thumbnail="https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg")
+    response = client.put(
+        "/api/music/playlists/" + playlist["id"] + "/membership", headers=owner, json={"track": track, "saved": True}
+    )
+    assert response.status_code == 200
+    assert response.json()["tracks"][0]["title"] == track["title"]
+    assert response.json()["artwork"] == [track["thumbnail"]]
+    row = client.get("/api/music/library?provider=youtube&source_id=abcdefghijk", headers=owner).json()["playlists"][0]
+    assert row["artwork"] == [track["thumbnail"]]
+    assert row["saved"] is True
+
+
+def test_search_cache_status_is_authorized_conditional_and_does_not_download(client: TestClient) -> None:
+    path = "/api/music/cache?provider=youtube&source_id=abcdefghijk"
+    with patch.object(client.app.state.music_sources, "download", side_effect=AssertionError("Speculative download")):
+        first = client.get(path, headers={"x-member": "200"})
+        assert first.status_code == 200
+        assert first.json() == {"state": "not_downloaded"}
+        assert client.get(path, headers={"x-member": "200", "If-None-Match": first.headers["etag"]}).status_code == 304
+    override(client, "300", view_music=False)
+    assert client.get(path, headers={"x-member": "300"}).status_code == 403

@@ -1,46 +1,19 @@
+import { useEffect, useState } from 'react'
 import { TranscriptionSettings } from './TranscriptionSettings'
-import { ThemedSelect } from './ThemedSelect'
-import { useEffect, useRef, useState } from 'react'
 import { ApplicationSettings } from './AccountPages'
+import { ApplicationConsole } from './ApplicationConsole'
 import { GoosePage } from './GoosePage'
 import { FunPage } from './FunPage'
 import { PermissionsPage } from './PermissionsPage'
-import { api, User } from './types'
+import { AdminSection } from './SettingsNavigation'
+import { StoragePage } from './MediaPages'
+import { User } from './types'
 
-const tabs = ['settings', 'conversation', 'permissions', 'fun', 'goose']
-const currentTab = () => { const value = new URLSearchParams(window.location.search).get('tab'); return value && tabs.includes(value) ? value : 'settings' }
-
-type Entry = { id: number; timestamp: number; level: string; source: string; message: string }
-
-export function AdminPage({ user, onError, onNotify }: { user: User; onError: (message: string) => void; onNotify: (message: string) => void }) {
-  const [tab, setTab] = useState(currentTab)
-  useEffect(() => { const back = () => setTab(currentTab()); window.addEventListener('popstate', back); return () => window.removeEventListener('popstate', back) }, [])
-  function selectTab(next: string) { setTab(next); window.history.pushState(null, '', `/admin?tab=${next}`) }
-  const [entries, setEntries] = useState<Entry[]>([])
-  const [paused, setPaused] = useState(false)
-  const [level, setLevel] = useState('all')
-  const [follow, setFollow] = useState(true)
-  const [truncated, setTruncated] = useState(false)
-  const cursor = useRef(0)
-  const viewport = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (paused) return
-    let active = true
-    let timer: ReturnType<typeof setTimeout>
-    async function load() {
-      try {
-        const data = await api<{ entries: Entry[]; cursor: number; truncated: boolean; reset?: boolean }>(`/admin/logs?after=${cursor.current}&limit=200`)
-        if (!active) return
-        cursor.current = data.cursor
-        if (data.reset || data.entries.length) setEntries(previous => [...(data.reset ? [] : previous), ...data.entries].slice(-2000))
-        if (data.truncated) setTruncated(true)
-      } catch (error) { if (active) onError((error as Error).message) }
-      if (active) timer = setTimeout(() => void load(), 2000)
-    }
-    void load()
-    return () => { active = false; clearTimeout(timer) }
-  }, [paused, onError])
-  useEffect(() => { if (follow && viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight }, [entries, follow, level])
-  const visible = entries.filter(entry => level === 'all' || entry.level === level)
-  return <div className="admin-page"><section className="settings-panel console-panel"><div className="audit-heading"><h2>Application console</h2><button className="secondary-button" onClick={() => setPaused(!paused)}>{paused ? 'Resume logs' : 'Pause logs'}</button></div><p>Bot and website diagnostics, including error traces. Credentials are redacted. The latest 2,000 entries are kept until the application restarts.</p><div className="console-controls"><label><ThemedSelect aria-label="Log level" value={level} onChange={selected => setLevel(selected)}><option value="all">All levels</option>{['INFO', 'WARNING', 'ERROR', 'CRITICAL'].map(value => <option key={value}>{value}</option>)}</ThemedSelect></label><label className="follow-toggle"><input type="checkbox" checked={follow} onChange={event => setFollow(event.target.checked)} /> Follow latest</label></div>{truncated && <p role="status">Older entries have expired from the console buffer.</p>}<div className="console-output" ref={viewport} onScroll={() => { const element = viewport.current; if (element && element.scrollHeight - element.scrollTop - element.clientHeight > 2) setFollow(false) }} role="log" aria-label="Application logs" aria-live="off">{visible.map(entry => <div className={`console-entry log-${entry.level.toLowerCase()}`} key={entry.id}><time title={new Date(entry.timestamp * 1000).toLocaleString()} dateTime={new Date(entry.timestamp * 1000).toISOString()}>{new Date(entry.timestamp * 1000).toLocaleTimeString(undefined, { hour12: false })}</time><span className="console-level">{entry.level}</span><span className="console-source" title={entry.source}>{entry.source}</span><pre>{entry.message}</pre></div>)}{!visible.length && <p>No log entries at this level.</p>}</div></section><div className="admin-tabs" role="tablist" aria-label="Admin sections" onKeyDown={event => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const next = event.key === 'Home' ? 'settings' : event.key === 'End' ? 'goose' : tabs[(tabs.indexOf(tab) + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length]; selectTab(next); event.currentTarget.querySelector<HTMLButtonElement>(`[id="admin-tab-${next}"]`)?.focus() }}>{tabs.map(value => <button key={value} role="tab" id={`admin-tab-${value}`} aria-selected={tab === value} aria-controls={`admin-panel-${value}`} tabIndex={tab === value ? 0 : -1} className={`tab ${tab === value ? 'active' : ''}`} onClick={() => selectTab(value)}>{value === 'settings' ? 'Settings' : value === 'conversation' ? 'Conversation' : value === 'fun' ? 'Fun' : value === 'goose' ? 'Goose' : 'Permissions'}</button>)}</div><div role="tabpanel" id={`admin-panel-${tab}`} aria-labelledby={`admin-tab-${tab}`}>{tab === 'settings' ? <div className="admin-settings-sections"><ApplicationSettings onError={onError} onNotify={onNotify} /></div> : tab === 'conversation' ? <section className="settings-panel"><h2>Conversation settings</h2><TranscriptionSettings onError={onError} onNotify={onNotify} /></section> : tab === 'fun' ? <FunPage onError={onError} onNotify={onNotify} /> : tab === 'goose' ? <GoosePage onError={onError} onNotify={onNotify} /> : <PermissionsPage user={user} onError={onError} onNotify={onNotify} />}</div></div>
+export function AdminPage({ user, tab, active, onError, onNotify, onNavigate }: { onNavigate: (path: string) => void; user: User; tab: AdminSection; active: boolean; onError: (message: string) => void; onNotify: (message: string) => void }) {
+  const [consoleVisited, setConsoleVisited] = useState(active && tab === 'console')
+  useEffect(() => { if (active && tab === 'console') setConsoleVisited(true) }, [active, tab])
+  return <div className="admin-page" hidden={!active}>
+    {consoleVisited && <div hidden={tab !== 'console'}><ApplicationConsole active={active && tab === 'console'} onError={onError} /></div>}
+    {active && tab !== 'console' && <div className="admin-section" key={tab}>{tab === 'storage' ? <StoragePage user={user} onNavigate={onNavigate} onError={onError} onNotify={onNotify} /> : tab === 'settings' ? <div className="admin-settings-sections"><ApplicationSettings onError={onError} onNotify={onNotify} /></div> : tab === 'conversation' ? <section className="settings-panel"><TranscriptionSettings onError={onError} onNotify={onNotify} /></section> : tab === 'fun' ? <FunPage onError={onError} onNotify={onNotify} /> : tab === 'goose' ? <GoosePage onError={onError} onNotify={onNotify} /> : <PermissionsPage key={user.id} user={user} onError={onError} onNotify={onNotify} />}</div>}
+  </div>
 }

@@ -9,7 +9,7 @@ import aiohttp
 from fastapi import HTTPException
 
 from app.db import DATABASE_ERRORS, new_id
-from app.music_access import music_user, music_voice_access
+from app.music_access import music_user, music_voice_access, recheck_music_voice_access
 from app.music_models import MusicTrack
 from app.music_sources import MusicSourceError
 
@@ -118,7 +118,9 @@ class MusicImports:
 
     async def enqueue(self, tracks: list[dict], user: dict) -> None:
         try:
-            await self.app.state.music.enqueue(tracks, user, guard=lambda: music_voice_access(self.app, user))
+            await self.app.state.music.enqueue(
+                tracks, user, guard=lambda: recheck_music_voice_access(self.app, user["id"])
+            )
         except ValueError as error:
             raise HTTPException(409, str(error)) from None
 

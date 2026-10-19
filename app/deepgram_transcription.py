@@ -268,7 +268,7 @@ class DeepgramStreams:
             logging.getLogger("app.deepgram").warning("%s Retrying in %s seconds.", manager.error, RETRY_SECONDS)
             manager.dropped += 1
             self.retry[stream.speaker[0]] = time.monotonic() + RETRY_SECONDS
-            manager.events.publish("conversation")
+            manager.events.publish("conversation", {"scope": "conversation.status"})
         finally:
             tasks = [task for task in (sender, receiver) if task]
             for task in tasks:

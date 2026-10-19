@@ -43,7 +43,7 @@ test('scrolling up pauses console following while new logs arrive', async ({ pag
     const entries = Array.from({ length: count }, () => ({ id: ++cursor, timestamp: 1700000000, level: 'INFO', source: 'app.test', message: `Console entry ${cursor}` }))
     return route.fulfill({ json: { entries, cursor, truncated: false } })
   })
-  await page.goto('/admin')
+  await page.goto('/admin?tab=console')
   const logs = page.getByRole('log', { name: 'Application logs' })
   await expect(logs).toContainText('Console entry 100')
   await logs.evaluate(element => { element.scrollTop = 100; element.dispatchEvent(new Event('scroll', { bubbles: true })) })

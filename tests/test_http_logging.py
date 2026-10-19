@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.bot import VoiceError
 from app.config import Settings
+from app.events import Events
 from app.main import register_private_responses, register_state_routes
 from app.mixer import CapacityError
 
@@ -28,6 +29,7 @@ from app.mixer import CapacityError
 )
 def test_http_error_severity_matches_response(caplog: pytest.LogCaptureFixture, code: int, level: int) -> None:
     app = FastAPI()
+    app.state.events = Events()
     register_private_responses(app)
 
     @app.get("/api/failure")
@@ -64,6 +66,7 @@ def test_operation_errors_preserve_diagnostics(
     traceback: bool,
 ) -> None:
     app = FastAPI()
+    app.state.events = Events()
     register_private_responses(app)
     register_state_routes(app, Settings(_env_file=None))
 
@@ -85,6 +88,7 @@ def test_operation_errors_preserve_diagnostics(
 
 def test_unhandled_http_failure_keeps_traceback(caplog: pytest.LogCaptureFixture) -> None:
     app = FastAPI()
+    app.state.events = Events()
     register_private_responses(app)
 
     @app.get("/failure")

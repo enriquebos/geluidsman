@@ -29,15 +29,15 @@ export function EmojiPicker({ value, onChange, serverEmojis = [] }: { value: str
   useEffect(() => {
     if (!open) return
     searchInput.current?.focus()
-    let active = true
-    void import('./data/emoji.json').then(module => { if (active) setGroups(module.default as EmojiGroup[]) })
+
     window.addEventListener('resize', place)
     function outside(event: PointerEvent) { if (!root.current?.contains(event.target as Node)) setOpen(false) }
     function escape(event: KeyboardEvent) { if (event.key === 'Escape') { event.stopPropagation(); setOpen(false); trigger.current?.focus() } }
     document.addEventListener('pointerdown', outside)
     window.addEventListener('keydown', escape, true)
-    return () => { active = false; window.removeEventListener('resize', place); document.removeEventListener('pointerdown', outside); window.removeEventListener('keydown', escape, true) }
+    return () => { window.removeEventListener('resize', place); document.removeEventListener('pointerdown', outside); window.removeEventListener('keydown', escape, true) }
   }, [open, place])
+  useEffect(() => { let active = true; void import('./data/emoji.json').then(module => { if (active) setGroups(module.default as EmojiGroup[]) }); return () => { active = false } }, [])
   useEffect(() => setEmojiPage(1), [category, search])
   function choose(emoji: string) { onChange(emoji); setOpen(false); setSearch(''); trigger.current?.focus() }
   const availableGroups = [...(serverEmojis.length ? [{ name: 'Server', items: serverEmojis.map(emoji => [emoji.value, emoji.name, emoji.name.toLowerCase()] as EmojiItem) }] : []), ...groups]

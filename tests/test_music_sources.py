@@ -365,7 +365,9 @@ def test_spotify_match_refuses_low_confidence_after_bounded_searches(tmp_path: P
         sources = MusicSources(settings(tmp_path))
         candidates = [youtube("a" * 11, 180, "Artist Different Song")]
         with patch.object(sources, "search", new=AsyncMock(return_value=candidates)) as search:
-            with pytest.raises(MusicSourceError, match="title, artist, version and duration") as error:
+            with pytest.raises(
+                MusicSourceError, match=r"No sufficiently close YouTube recording matched this Spotify song's title$"
+            ) as error:
                 await sources.match(sources.spotify_track(spotify_item()))
             assert search.await_count == 4
             assert error.value.details["reason"] == "match_not_found"
@@ -843,7 +845,7 @@ def test_generic_topic_channel_requires_verified_original_artist(tmp_path: Path)
         with (
             patch.object(sources, "search", new=AsyncMock(return_value=[candidate])),
             patch.object(sources, "resolve", new=AsyncMock(return_value={"tracks": [{**full, "artist": "Unrelated"}]})),
-            pytest.raises(MusicSourceError, match="Choose a recording manually"),
+            pytest.raises(MusicSourceError, match="No sufficiently close YouTube recording"),
         ):
             await sources.match(track)
         await sources.close()

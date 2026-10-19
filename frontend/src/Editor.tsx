@@ -1,8 +1,14 @@
+import { liveClientId, liveEvents } from './liveEvents'
+import { waveform } from './waveformCache'
+import { resources, useResource } from './confirmedResources'
+import { Loading, LoadError } from './Loading'
+import type { ComponentProps } from 'react'
+import type { State } from './types'
 import { useUnsavedWork } from './useUnsavedWork'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import WaveSurfer from 'wavesurfer.js'
 import { ArrowLeft, Check, Pause, Play, Scissors, ZoomIn, ZoomOut } from 'lucide-react'
-import { api, mediaURL, Source, ServerEmoji, timeLabel, preferences } from './types'
+import { api, can, mediaURL, Source, ServerEmoji, timeLabel, preferences } from './types'
 import { TagInput } from './TagInput'
 import { EmojiPicker } from './EmojiPicker'
 import { CaptionSearch } from './CaptionSearch'
@@ -10,8 +16,9 @@ import { CaptionSearch } from './CaptionSearch'
 type Selection = { start: number; end: number }
 type Drag = { side: 'start' | 'end' | 'region'; length: number; offset: number; pointer: number; originalZoom: number; lastX: number; lastTime: number; timer: ReturnType<typeof setTimeout> | null; precise: boolean }
 
-export function Editor({ serverEmojis, canCreate, source, initialTime = 0, availableTags, maxLength, onClose, onSaved, onError }: { serverEmojis?: ServerEmoji[]; canCreate: boolean; source: Source; initialTime?: number; availableTags: string[]; maxLength: number; onClose: () => void; onSaved: () => void; onError: (message: string) => void }) {
+export function Editor({ active = true, serverEmojis, canCreate, source, initialTime = 0, availableTags, maxLength, onClose, onSaved, onError }: { active?: boolean; serverEmojis?: ServerEmoji[]; canCreate: boolean; source: Source; initialTime?: number; availableTags: string[]; maxLength: number; onClose: () => void; onSaved: () => void; onError: (message: string) => void }) {
   const video = useRef<HTMLVideoElement>(null)
+  useEffect(() => { if (!active) video.current?.pause() }, [active])
   const container = useRef<HTMLDivElement>(null)
   const viewport = useRef<HTMLDivElement>(null)
   const ws = useRef<WaveSurfer | null>(null)
@@ -54,14 +61,12 @@ export function Editor({ serverEmojis, canCreate, source, initialTime = 0, avail
     syncGeometry(next)
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     let cancelled = false
-    const controller = new AbortController()
+    setReady(false)
     async function initialize() {
       try {
-        const response = await fetch(mediaURL(source.id, 'peaks.json', source.media_id), { signal: controller.signal })
-        if (!response.ok) throw new Error('Waveform could not be loaded.')
-        const { peaks } = await response.json()
+        const { peaks } = await waveform(source)
         if (cancelled || !container.current || !video.current) return
         const fit = (viewport.current?.clientWidth ?? 600) / source.duration
         const wave = WaveSurfer.create({ container: container.current, media: video.current, peaks: [peaks], duration: source.duration, height: 112,
@@ -98,7 +103,6 @@ export function Editor({ serverEmojis, canCreate, source, initialTime = 0, avail
     if (viewport.current) observer.observe(viewport.current)
     return () => {
       cancelled = true
-      controller.abort()
       observer.disconnect()
       if (drag.current?.timer) clearTimeout(drag.current.timer)
       ws.current?.destroy()
@@ -221,7 +225,7 @@ export function Editor({ serverEmojis, canCreate, source, initialTime = 0, avail
     <div className="wave-toolbar"><span><span className="tiny-dot" /> {precision ? 'Precision mode · 4×' : 'Select your moment'}</span><div><button className="icon-button" aria-label="Zoom out" disabled={!ready || precision} onClick={() => zoomTo(geometry.zoom / 2)}><ZoomOut size={17} /></button><button className="icon-button" aria-label="Zoom in" disabled={!ready || precision} onClick={() => zoomTo(geometry.zoom * 2)}><ZoomIn size={17} /></button><button className="text-button" disabled={!ready || precision} onClick={() => zoomTo(geometry.width / source.duration, 0, 0)}>Fit</button></div></div>
     <div className="wave-frame"><div className="wave-viewport" ref={viewport} data-testid="wave-viewport">
       <div ref={container} />
-      {!ready && <div className="wave-loading">Building your waveform…</div>}
+      {!ready && <Loading label="Loading waveform" rows={2} />}
       {ready && <div className="selection-layer">
         <button type="button" aria-label="Move selected section" data-testid="selection-region" className={`selected-region ${valid ? '' : 'invalid'}`} style={{ left: Math.max(0, startX), width: Math.max(0, Math.min(geometry.width, endX) - Math.max(0, startX)) }}
           onPointerDown={event => begin(event, 'region')} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={event => { if (drag.current) finish(event) }}
@@ -240,4 +244,39 @@ export function Editor({ serverEmojis, canCreate, source, initialTime = 0, avail
     {!valid && <p className="field-error">Choose between 0.1 and {maxLength} seconds.</p>}
     {canCreate && <form onSubmit={save} className="clip-form"><div className="form-row"><label>Sound name<input placeholder="Give this moment a name" required maxLength={255} value={name} onChange={e => setName(e.target.value)} /></label><EmojiPicker serverEmojis={serverEmojis} value={emoji} onChange={setEmoji} /></div><div className="form-row"><TagInput value={tags} onChange={setTags} available={availableTags} /></div><div className="form-action"><span><Check size={14} /> Your source video stays in the library.</span><button className="primary-button" disabled={!ready || !valid || saving || !name.trim()}>{saving ? 'Saving sound…' : 'Add to soundboard'} <Scissors size={16} /></button></div></form>}
   </section>
+}
+
+let leaseSequence = 0
+
+export function ValidatedEditor(props: ComponentProps<typeof Editor>) {
+  const current = useResource<Source>(`/state/sources/${props.source.id}`)
+  const options = useResource<{ user: State['user']; emojis: State['emojis']; tags: string[]; max_clip_seconds: number }>('/state/editor-options')
+  const [lease, setLease] = useState('')
+  const [leaseError, setLeaseError] = useState('')
+  const [leaseRetry, setLeaseRetry] = useState(0)
+  const mediaVersion = current.data?.media_id || props.source.media_id || props.source.id
+  const available = current.data?.media_available !== 0
+  const leaseKey = props.source.id + ':' + mediaVersion
+  const mounted = useRef(false)
+  useEffect(() => {
+    let cancelled = false, generation = 0
+    const acquire = async () => {
+      const attempt = ++generation
+      setLease(''); setLeaseError('')
+      try { await api('/media/lease', 'POST', { client_id: liveClientId, source_id: props.source.id, media_version: mediaVersion, sequence: ++leaseSequence }); if (!cancelled && attempt === generation) { setLease(leaseKey); mounted.current = true } }
+      catch (error) { if (!cancelled && attempt === generation) setLeaseError((error as Error).message) }
+    }
+    const events = liveEvents()
+    if (available) void acquire()
+    events.addEventListener('refresh', () => { if (available) void acquire() })
+    events.addEventListener('error', () => { generation++; setLease('') })
+    return () => { cancelled = true; events.close(); void api('/media/lease', 'POST', { client_id: liveClientId, source_id: null, sequence: ++leaseSequence }).catch(() => {}) }
+  }, [props.source.id, mediaVersion, available, leaseRetry])
+  const enabled = lease === leaseKey && available && Boolean(current.data)
+  const retained = useRef<Source | null>(null)
+  const scope = useRef(resources())
+  if (scope.current !== resources()) { scope.current = resources(); retained.current = null }
+  if (current.data) retained.current = current.data
+  const source = retained.current
+  return <>{!available ? <div className="empty-state"><h2>Not downloaded</h2><p>The library entry is kept. Download this source again to watch or cut it.</p>{current.data && options.data && can(options.data.user, 'import_videos') && <button className="primary-button" onClick={() => void api(`/sources/${props.source.id}/refresh`, 'POST').then(() => props.onClose()).catch(error => props.onError(error.message))}>Download video</button>}</div> : leaseError ? <LoadError error={leaseError} retry={() => { void current.refresh(); setLeaseRetry(value => value + 1) }} /> : !lease ? <Loading label="Protecting editor media" shape="editor" /> : null}{current.error ? <LoadError error={current.error} retry={current.refresh} /> : !current.data ? <Loading label="Loading sound editor" shape="editor" /> : null}{source && mounted.current && <div hidden={!enabled}><Editor {...props} active={enabled} source={source} serverEmojis={options.data?.emojis || props.serverEmojis} availableTags={options.data?.tags || props.availableTags} canCreate={Boolean(options.data && props.canCreate && can(options.data.user, 'create_sounds'))} maxLength={options.data ? can(options.data.user, 'long_sounds') ? 600 : options.data.max_clip_seconds : props.maxLength} /></div>}</>
 }

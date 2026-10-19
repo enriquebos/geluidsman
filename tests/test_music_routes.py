@@ -5,7 +5,7 @@ import json
 import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 import httpx
@@ -100,6 +100,30 @@ def patch_playlist(client: TestClient, path: str, *, json: dict, headers: dict |
     return client.patch(path, json={**json, "expected_updated_at": current["updated_at"]}, headers=headers)
 
 
+def test_playlist_reorder_publishes_the_confirmed_detail_and_download_order(client: TestClient) -> None:
+    playlist = client.post("/api/music/playlists", json={"name": "Reorder"}).json()
+    path = "/api/music/playlists/" + playlist["id"]
+    first = song(thumbnail="https://i.ytimg.com/vi/abcdefghijk/default.jpg")
+    second = song("lmnopqrstuv", title="Second")
+    initial = patch_playlist(client, path, json={"tracks": [first, second]}).json()
+    with patch.object(client.app.state.events, "publish") as publish:
+        response = client.patch(path, json={"tracks": [second, first], "expected_updated_at": initial["updated_at"]})
+    assert response.status_code == 200, response.text
+    change = next(call.args[1] for call in publish.call_args_list if call.args[0] == "music_playlists")
+    assert change["ids"] == [playlist["id"]]
+    assert change["resource"] == path.removeprefix("/api")
+    assert change["value"] == response.json()
+    assert [item["source_id"] for item in change["value"]["tracks"]] == [second["source_id"], first["source_id"]]
+    assert len(change["value"]["cache"]) == 2
+    assert change["value"]["artwork"] == [first["thumbnail"]]
+    assert change["value"]["updated_at"] > initial["updated_at"]
+    with patch.object(client.app.state.events, "publish") as publish:
+        rejected = client.patch(path, json={"tracks": [first, second], "expected_updated_at": initial["updated_at"]})
+    assert rejected.status_code == 409
+    assert not any(call.args[0] == "music_playlists" for call in publish.call_args_list)
+    assert client.get(path).json()["tracks"] == response.json()["tracks"]
+
+
 def override(client: TestClient, identity: str, **permissions: bool) -> None:
     client.app.state.db.execute(
         "UPDATE users SET permission_overrides=? WHERE id=?", (json.dumps(permissions), identity)
@@ -116,8 +140,9 @@ def test_music_browsing_outside_voice_and_required_permissions(client: TestClien
 
 
 @pytest.mark.parametrize("identity", ["100", "200"])
-def test_admin_and_ordinary_members_must_be_in_active_voice(client: TestClient, identity: str) -> None:
+def test_members_without_outside_permission_must_be_in_active_voice(client: TestClient, identity: str) -> None:
     headers = {"x-member": identity}
+    override(client, identity, outside_voice_control=False)
     voice = connected(client, "300")
     client.app.state.bot.state.audio_mode = "music"
     requests = [
@@ -580,3 +605,59 @@ def test_music_import_query_limit_matches_search(client: TestClient) -> None:
     assert client.post("/api/music/imports", json={"query": "x" * 1000}, headers={"x-member": "200"}).status_code == 202
     assert client.post("/api/music/imports", json={"query": "x" * 1001}, headers={"x-member": "200"}).status_code == 422
     imports.start.assert_awaited_once()
+
+
+def test_outside_voice_permission_covers_music_without_bypassing_action_permissions(client: TestClient) -> None:
+    voice = connected(client, "300")
+    headers = {"x-member": "200"}
+    override(client, "200", outside_voice_control=True)
+    assert client.put("/api/audio-mode", json={"mode": "music"}, headers=headers).status_code == 200
+    queued = client.post("/api/music/queue", json={"tracks": [song(), song("lmnopqrstuv")]}, headers=headers)
+    assert queued.status_code == 200, queued.text
+    ids = [entry["id"] for entry in queued.json()["queue"]]
+    assert client.put("/api/music/queue/order", json={"ids": ids}, headers=headers).status_code == 200
+    assert client.post("/api/music/player", json={"action": "pause"}, headers=headers).status_code == 200
+    override(client, "200", outside_voice_control=True, control_music=False)
+    assert client.post("/api/music/queue", json={"tracks": [song()]}, headers=headers).status_code == 403
+    assert client.delete("/api/music/queue", headers=headers).status_code == 403
+    override(client, "200", outside_voice_control=True, switch_audio_mode=False)
+    assert client.put("/api/audio-mode", json={"mode": "soundboard"}, headers=headers).status_code == 403
+    override(client, "200", outside_voice_control=False)
+    assert client.post("/api/music/player", json={"action": "pause"}, headers=headers).status_code == 403
+    assert client.delete("/api/music/queue", headers=headers).status_code == 403
+    override(client, "200", outside_voice_control=True)
+    voice.is_connected.return_value = False
+    assert client.post("/api/music/player", json={"action": "pause"}, headers=headers).status_code == 409
+
+
+def test_mode_change_rechecks_outside_permission_after_waiting_for_voice_lock(client: TestClient) -> None:
+    connected(client, "300")
+    override(client, "200", outside_voice_control=True)
+    state = client.app.state.bot.state
+    original = state.select_mode
+
+    async def revoke(mode: str, user_id: str) -> None:
+        override(client, user_id, outside_voice_control=False)
+        await original(mode, user_id)
+
+    with patch.object(state, "select_mode", side_effect=revoke):
+        response = client.put("/api/audio-mode", json={"mode": "music"}, headers={"x-member": "200"})
+    assert response.status_code != 200
+    assert state.audio_mode == "soundboard"
+
+
+def test_queue_rechecks_revoked_outside_permission_at_commit(client: TestClient) -> None:
+    connected(client, "300")
+    client.app.state.bot.state.audio_mode = "music"
+    override(client, "200", outside_voice_control=True)
+    player = client.app.state.music
+    original = player.enqueue
+
+    async def revoke(*args: object, **kwargs: object) -> dict:
+        override(client, "200", outside_voice_control=False)
+        return await original(*args, **kwargs)
+
+    with patch.object(player, "enqueue", side_effect=revoke):
+        response = client.post("/api/music/queue", json={"tracks": [song()]}, headers={"x-member": "200"})
+    assert response.status_code == 403
+    assert player.snapshot()["queue"] == []

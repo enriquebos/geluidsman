@@ -4,30 +4,32 @@ import { test, expect } from '@playwright/test'
 test('admin tabs preserve console controls and scroll, reload and browser history', async ({ page }) => {
   const entries = Array.from({ length: 100 }, (_, index) => ({ id: index + 1, timestamp: 1700000000, level: 'INFO', source: 'app.test', message: `Console line ${index + 1}` }))
   await page.route('**/api/admin/logs?*', route => route.fulfill({ json: { entries: new URL(route.request().url()).searchParams.get('after') === '0' ? entries : [], cursor: 100, truncated: false } }))
-  await page.goto('/admin')
+  await page.goto('/admin?tab=console')
   const consoleView = page.getByRole('log', { name: 'Application logs' })
   await expect(consoleView).toContainText('Console line 100')
   await page.getByRole('checkbox', { name: 'Follow latest' }).uncheck()
   await selectOption(page.getByLabel('Log level'), 'INFO')
   await consoleView.evaluate(element => { element.scrollTop = 40 })
   const position = await consoleView.evaluate(element => element.scrollTop)
-  await page.getByRole('tab', { name: 'Permissions', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Permissions', exact: true }).click()
   await expect(page).toHaveURL(/\/admin\?tab=permissions$/)
   await expect(page.getByRole('heading', { name: 'User permissions' })).toBeVisible()
+  await page.getByRole('navigation', { name: 'Settings navigation' }).getByRole('button', { name: 'Application console', exact: true }).click()
   await expect(page.getByRole('checkbox', { name: 'Follow latest' })).not.toBeChecked()
   await expect(page.getByLabel('Log level')).toContainText('INFO')
   expect(await consoleView.evaluate(element => element.scrollTop)).toBe(position)
+  await page.getByRole('navigation', { name: 'Settings navigation' }).getByRole('button', { name: 'Permissions', exact: true }).click()
   await page.reload()
-  await expect(page.getByRole('tab', { name: 'Permissions', exact: true })).toHaveAttribute('aria-selected', 'true')
-  await page.getByRole('tab', { name: 'Settings', exact: true }).click()
+  await expect(page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Permissions', exact: true })).toHaveAttribute('aria-current', 'page')
+  await page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'General', exact: true }).click()
   await expect(page).toHaveURL(/tab=settings$/)
   await page.goBack()
-  await expect(page.getByRole('tab', { name: 'Permissions', exact: true })).toHaveAttribute('aria-selected', 'true')
-  await page.getByRole('tab', { name: 'Permissions', exact: true }).focus()
+  await expect(page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Permissions', exact: true })).toHaveAttribute('aria-current', 'page')
+  await page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Permissions', exact: true }).focus()
   await page.keyboard.press('Home')
-  await expect(page.getByRole('tab', { name: 'Settings', exact: true })).toBeFocused()
+  await expect(page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'General', exact: true })).toBeFocused()
   await page.keyboard.press('ArrowRight')
-  await expect(page.getByRole('tab', { name: 'Conversation', exact: true })).toBeFocused()
+  await expect(page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Storage', exact: true })).toBeFocused()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy()
 })
 
@@ -100,12 +102,13 @@ test('restricted users retain previews and favourites, get ownership controls an
   const baselineUser = await (await request.get('/api/auth/me')).json()
   const baselineState = await (await request.get('/api/state')).json()
   await page.route('**/api/auth/me', route => route.fulfill({ json: { ...baselineUser, admin: false, permissions } }))
-  await page.route('**/api/state*', route => {
+  await page.route(/\/api\/state(?:\/.*)?$/, route => {
     const state = structuredClone(baselineState)
     state.user.admin = false; state.user.permissions = permissions
     state.status.connected = true; state.status.bot_ready = true
     state.clips = state.clips.map((clip: { id: string }) => clip.id === otherId ? { ...clip, creator_id: '200' } : clip)
-    return route.fulfill({ json: state })
+    const path = new URL(route.request().url()).pathname
+    return route.fulfill({ json: path === '/api/state/sources/fixture' ? state.sources.find((source: { id: string }) => source.id === 'fixture') : path === '/api/state/editor-options' ? { user: state.user, emojis: state.emojis, tags: [], max_clip_seconds: state.limits.max_clip_seconds } : state })
   })
   try {
     await page.goto('/soundboard')
@@ -141,8 +144,12 @@ test('protected administrator can test own permissions while admin access remain
   let userListRequests = 0
   page.on('request', request => { const path = new URL(request.url()).pathname; if (path === '/api/state') stateRequests++; if (path === '/api/admin/users') userListRequests++ })
   try {
-    await page.goto('/admin?tab=permissions')
+    await page.goto('/admin?tab=console')
+    await expect(page.getByRole('log', { name: 'Application logs' })).toBeVisible()
+    await page.getByRole('navigation', { name: 'Settings navigation' }).getByRole('button', { name: 'Permissions', exact: true }).click()
+    const searched = page.waitForResponse(response => { const url = new URL(response.url()); return url.pathname === '/api/admin/users' && url.searchParams.get('q') === 'Test Member' })
     await page.getByLabel('Search permission users').fill('Test Member')
+    await searched
     await page.getByRole('button', { name: 'Permissions for Test Member', exact: true }).click()
     await expect(page.getByRole('switch', { name: 'Access admin panel', exact: true })).toBeDisabled()
     await page.getByRole('switch', { name: 'Play sounds', exact: true }).uncheck()
@@ -157,7 +164,8 @@ test('protected administrator can test own permissions while admin access remain
       if (testInfo.project.name === 'desktop') await expect(page.getByRole('switch', { name, exact: true })).toBeFocused()
     }
     expect(stateRequests).toBe(beforeRequests)
-    expect(userListRequests).toBe(beforeUserListRequests)
+    expect(userListRequests - beforeUserListRequests).toBeGreaterThan(0)
+    expect(userListRequests - beforeUserListRequests).toBeLessThanOrEqual(9)
     await expect(page.getByRole('button', { name: 'Permissions for Test Member', exact: true })).toBeEnabled()
     expect(await page.locator('.console-output').evaluate(element => (window as unknown as { permissionConsole: Element }).permissionConsole === element)).toBe(true)
     const user = await (await request.get('/api/auth/me')).json()

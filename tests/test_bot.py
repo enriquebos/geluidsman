@@ -582,3 +582,22 @@ def test_voice_mute_events_reach_only_active_api_participants(
         db.close()
 
     asyncio.run(scenario())
+
+
+def test_fresh_directory_read_bypasses_the_lifetime_cache(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = Database(tmp_path / "fresh-directory.sqlite3")
+        bot = Bot(Settings(_env_file=None, data_dir=tmp_path), db, Events())
+        bot.client.is_ready = Mock(return_value=True)
+        bot.client.http.get_members = AsyncMock(
+            side_effect=[
+                [{"user": {"id": "100", "username": "Earlier"}}],
+                [{"user": {"id": "100", "username": "Current"}}],
+            ]
+        )
+        assert (await bot.guild_members())[0]["name"] == "Earlier"
+        assert (await bot.guild_members(fresh=True))[0]["name"] == "Current"
+        assert bot.client.http.get_members.await_count == 2
+        db.close()
+
+    asyncio.run(scenario())

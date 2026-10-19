@@ -87,7 +87,7 @@ class TriggerInput(BaseModel):
 
 def can_read_live_conversation(request: Request) -> bool:
     user = request.state.user
-    if user["permissions"].get("always_live_conversation", False):
+    if user["permissions"].get("outside_voice_control", False):
         return True
     voice = request.app.state.bot.voice
     return bool(
@@ -123,7 +123,7 @@ def register_conversation_routes(app: FastAPI) -> None:
         await app.state.db.run(
             app.state.db.audit, request.state.user["id"], "conversation.recording", details=body.model_dump()
         )
-        app.state.events.publish("conversation")
+        app.state.events.publish("conversation", {"scope": "conversation.status"})
         return {"enabled": manager.enabled}
 
     @app.put(
@@ -136,7 +136,7 @@ def register_conversation_routes(app: FastAPI) -> None:
         await app.state.db.run(
             app.state.db.audit, request.state.user["id"], "conversation.recording", details={"language": body.language}
         )
-        app.state.events.publish("conversation")
+        app.state.events.publish("conversation", {"scope": "conversation.status"})
         return {"language": body.language}
 
     register_message_routes(app)
@@ -206,7 +206,7 @@ def register_message_routes(app: FastAPI) -> None:
 def register_trigger_users(app: FastAPI, path: str, permission: str) -> None:
     @app.get(path, dependencies=[Depends(require_permission(permission))])
     async def users() -> dict:
-        return {"items": await app.state.bot.guild_members()}
+        return {"items": await app.state.bot.guild_members(fresh=True)}
 
 
 def register_trigger_routes(app: FastAPI) -> None:
@@ -258,8 +258,13 @@ def register_trigger_routes(app: FastAPI) -> None:
                 resource_id=trigger_id,
                 name=body.phrase,
             )
-        app.state.events.publish("conversation")
-        return {"id": trigger_id}
+        with app.state.db.lock:
+            value = triggers()
+            app.state.events.publish(
+                "conversation",
+                {"scope": "conversation.rules", "resource": "/conversation/triggers", "value": value},
+            )
+        return {"id": trigger_id, **value}
 
     @app.put(
         "/api/conversation/triggers/{trigger_id}",
@@ -291,8 +296,13 @@ def register_trigger_routes(app: FastAPI) -> None:
                 resource_id=trigger_id,
                 name=body.phrase,
             )
-        app.state.events.publish("conversation")
-        return {"ok": True}
+        with app.state.db.lock:
+            value = triggers()
+            app.state.events.publish(
+                "conversation",
+                {"scope": "conversation.rules", "resource": "/conversation/triggers", "value": value},
+            )
+        return {"ok": True, **value}
 
     @app.delete(
         "/api/conversation/triggers/{trigger_id}",
@@ -308,8 +318,13 @@ def register_trigger_routes(app: FastAPI) -> None:
             resource_id=trigger_id,
             name=trigger["phrase"],
         )
-        app.state.events.publish("conversation")
-        return {"ok": True}
+        with app.state.db.lock:
+            value = triggers()
+            app.state.events.publish(
+                "conversation",
+                {"scope": "conversation.rules", "resource": "/conversation/triggers", "value": value},
+            )
+        return {"ok": True, **value}
 
 
 def register_language_routes(app: FastAPI) -> None:
@@ -322,7 +337,7 @@ def register_language_routes(app: FastAPI) -> None:
         if manager.deepgram:
             await manager.close_session()
         await app.state.db.run(app.state.db.audit, request.state.user["id"], "settings.edit", details=body.model_dump())
-        app.state.events.publish("conversation")
+        app.state.events.publish("conversation", {"scope": "transcription.settings"})
         return body.model_dump()
 
 
@@ -336,6 +351,7 @@ def register_provider_routes(app: FastAPI) -> None:
         except (aiohttp.ClientError, TimeoutError) as error:
             raise HTTPException(503, "The local transcription worker could not be reached.") from error
         await app.state.db.run(app.state.db.audit, request.state.user["id"], "settings.edit", details=body.model_dump())
+        app.state.events.publish("conversation", {"scope": "transcription.settings"})
         return status
 
 
@@ -354,7 +370,14 @@ def register_deepgram_routes(app: FastAPI) -> None:
         await app.state.db.run(
             app.state.db.audit, request.state.user["id"], "settings.edit", details={"deepgram_options_updated": True}
         )
-        app.state.events.publish("conversation")
+        app.state.events.publish(
+            "conversation",
+            {
+                "scope": "transcription.deepgram",
+                "resource": "/admin/transcription/deepgram",
+                "value": body.model_dump(),
+            },
+        )
         return body.model_dump()
 
 
@@ -377,11 +400,30 @@ def register_transcription_routes(app: FastAPI) -> None:
             "settings.edit",
             details={"vocabulary_characters": len(body.hints)},
         )
+        app.state.events.publish(
+            "conversation",
+            {
+                "scope": "transcription.vocabulary",
+                "resource": "/admin/transcription/vocabulary",
+                "value": body.model_dump(),
+            },
+        )
         return body.model_dump()
 
+    @app.get("/api/admin/transcription/settings", dependencies=[Depends(authorize_admin)])
+    async def transcription_settings() -> dict:
+        manager = app.state.conversation
+        selected = await app.state.db.run(app.state.db.setting, "transcription_model", "large-v3-turbo")
+        return {
+            "provider": manager.provider,
+            "language": "multi" if manager.language == "auto" else manager.language,
+            "selected": "nova-3" if manager.deepgram else selected,
+        }
+
+    @app.get("/api/admin/transcription/status", dependencies=[Depends(authorize_admin)])
     @app.get("/api/admin/transcription", dependencies=[Depends(authorize_admin)])
     async def transcription_status() -> dict:
-        return await app.state.conversation.synchronize_model()
+        return await app.state.conversation.inspect_model()
 
     @app.put("/api/admin/transcription", dependencies=[Depends(authorize_admin)])
     async def transcription_model(body: TranscriptionInput, request: Request) -> dict:
@@ -396,7 +438,7 @@ def register_transcription_routes(app: FastAPI) -> None:
         except (aiohttp.ClientError, TimeoutError, ValueError) as error:
             raise HTTPException(503, "Could not request the model switch. The current model is unchanged.") from error
         await app.state.db.run(app.state.db.audit, request.state.user["id"], "settings.edit", details=body.model_dump())
-        app.state.events.publish("conversation")
+        app.state.events.publish("conversation", {"scope": "transcription.settings"})
         return status
 
 

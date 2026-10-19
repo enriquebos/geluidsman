@@ -48,6 +48,8 @@ test('drawing editor supports coloured input, undo, saving, editing and themed d
   await page.getByLabel('Drawing name').fill('My drawing')
   await page.getByRole('button', { name: 'Save drawing', exact: true }).click()
   await expect(page.locator('.toast')).toContainText('Drawing saved.')
+  await expect(page.getByRole('status', { name: 'Drawing save status', exact: true })).toHaveText('Saved')
+  await expect(page.getByRole('button', { name: 'Save drawing', exact: true })).toBeDisabled()
   expect(posted.name).toBe('My drawing'); expect(posted.strokes[0].color).toBe('#5ba8f5')
   await page.getByRole('button', { name: 'Sketch', exact: true }).click()
   await page.getByRole('option', { name: 'My drawing', exact: true }).click()

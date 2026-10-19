@@ -1,3 +1,4 @@
+import { SettingsFeedback, SaveState } from './SettingsControls'
 import { useRef, useState } from 'react'
 import { api } from './types'
 import { drawingColors, SavedSketch, SketchStroke, simplify, strokePaths } from './GooseDrawings'
@@ -11,6 +12,8 @@ export function GooseSketchEditor({ selected, onSave, onDelete, onError, onNotif
   const [color, setColor] = useState(drawingColors[0])
   const [baseline, setBaseline] = useState(JSON.stringify({ name: '', strokes: [] }))
   const [busy, setBusy] = useState(false)
+  const [saveState, setSaveState] = useState<SaveState>('idle')
+  const [saveError, setSaveError] = useState('')
   const [drawing, setDrawing] = useState(false)
   const pointerId = useRef<number | null>(null)
   const [deletion, setDeletion] = useState(false)
@@ -22,6 +25,7 @@ export function GooseSketchEditor({ selected, onSave, onDelete, onError, onNotif
   const dialog = useDialogEscape(() => setDeletion(false), deletion)
   function load() {
     if (!selected || dirty) return
+    setSaveState('idle'); setSaveError('')
     setIdentity(selected.id); setName(selected.name); setStrokes(selected.strokes)
     setBaseline(JSON.stringify({ name: selected.name, strokes: selected.strokes }))
   }
@@ -42,12 +46,12 @@ export function GooseSketchEditor({ selected, onSave, onDelete, onError, onNotif
     }
   }
   async function save() {
-    if (busy || !name.trim() || !strokes.length) return
-    setBusy(true)
+    if (busy || !dirty || !name.trim() || !strokes.length) return
+    setBusy(true); setSaveState('saving'); setSaveError('')
     try {
       const result = await api<SavedSketch>(`/admin/goose/sketches${identity ? '/' + identity : ''}`, identity ? 'PUT' : 'POST', { name: name.trim(), strokes })
-      setIdentity(result.id); setName(result.name); setBaseline(JSON.stringify({ name: result.name, strokes })); onSave(result); onNotify('Drawing saved.')
-    } catch (error) { onError((error as Error).message) }
+      setIdentity(result.id); setName(result.name); setBaseline(JSON.stringify({ name: result.name, strokes })); onSave(result); setSaveState('saved'); onNotify('Drawing saved.')
+    } catch (error) { setSaveState('error'); setSaveError((error as Error).message); onError((error as Error).message) }
     finally { setBusy(false) }
   }
   async function remove() {
@@ -56,8 +60,8 @@ export function GooseSketchEditor({ selected, onSave, onDelete, onError, onNotif
     try {
       await api(`/admin/goose/sketches/${selected.id}`, 'DELETE')
       if (identity === selected.id) { setIdentity(null); setName(''); setStrokes([]); setBaseline(JSON.stringify({ name: '', strokes: [] })) }
-      setDeletion(false); onDelete(selected.id); onNotify('Drawing deleted.')
-    } catch (error) { onError((error as Error).message) }
+      setDeletion(false); setSaveState('idle'); setSaveError(''); onDelete(selected.id); onNotify('Drawing deleted.')
+    } catch (error) { setSaveState('error'); setSaveError((error as Error).message); onError((error as Error).message) }
     finally { setBusy(false) }
   }
   return <div className="goose-sketch-editor"><div className="goose-editor-heading"><div><h3>Make your own drawing</h3><p>Draw with a mouse, finger or pen. Save it for everyone to use.</p></div>{selected && <div className="goose-editor-actions"><button className="secondary-button" disabled={busy || dirty} onClick={load}>Edit selected drawing</button><button className="danger-button" disabled={busy} onClick={() => setDeletion(true)}>Delete selected drawing</button></div>}</div><div className="goose-editor-layout"><svg ref={canvas} className="goose-editor-canvas" viewBox="0 0 150 130" role="img" aria-label="Drawing canvas" onPointerDown={event => {
@@ -68,5 +72,5 @@ export function GooseSketchEditor({ selected, onSave, onDelete, onError, onNotif
   }} onPointerMove={event => {
     if (event.pointerId !== pointerId.current || !current.current || current.current.points.length >= 4096) return
     current.current.points.push(position(event)); ink.current?.setAttribute('d', strokePaths([current.current])[0])
-  }} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish}>{strokes.map((stroke, index) => <path key={index} d={strokePaths([stroke])[0]} stroke={stroke.color} />)}<path ref={ink} /></svg><div className="goose-editor-tools"><div className="goose-color-palette" role="group" aria-label="Ink colour">{drawingColors.map((value, index) => <button key={value} className="goose-color" style={{ background: value }} aria-label={['Red', 'Green', 'Blue', 'Purple', 'Black', 'White'][index]} aria-pressed={color === value} disabled={busy} onClick={() => setColor(value)} />)}</div><div className="goose-editor-actions"><button className="secondary-button" disabled={busy || !strokes.length} onClick={() => setStrokes(items => items.slice(0, -1))}>Undo</button><button className="secondary-button" disabled={busy || !strokes.length} onClick={() => setStrokes([])}>Clear</button></div><form onSubmit={event => { event.preventDefault(); void save() }}><label>Drawing name<input maxLength={60} value={name} disabled={busy} onChange={event => setName(event.target.value)} /></label><p>{strokes.length}/32 strokes · {strokes.reduce((sum, item) => sum + item.points.length, 0)}/512 points</p><button className="primary-button" disabled={busy || !strokes.length || !name.trim()}>Save drawing</button></form>{identity && <button className="text-button" disabled={busy || dirty} onClick={() => { setIdentity(null); setName(''); setStrokes([]); setBaseline(JSON.stringify({ name: '', strokes: [] })) }}>New drawing</button>}</div></div>{deletion && <div className="modal-backdrop"><section ref={dialog} className="modal" role="dialog" aria-modal="true" aria-labelledby="delete-sketch-title" onKeyDown={event => { if (event.key === 'Enter' && !event.defaultPrevented && !busy) { event.preventDefault(); void remove() } }}><h2 id="delete-sketch-title">Delete drawing?</h2><p>Remove “{selected?.name}” from the shared library. Active drawings will finish.</p><form onSubmit={event => { event.preventDefault(); void remove() }}><div className="modal-actions"><button autoFocus type="button" className="secondary-button" disabled={busy} onClick={() => setDeletion(false)}>Cancel</button><button className="danger-button" disabled={busy}>Delete drawing</button></div></form></section></div>}</div>
+  }} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish}>{strokes.map((stroke, index) => <path key={index} d={strokePaths([stroke])[0]} stroke={stroke.color} />)}<path ref={ink} /></svg><div className="goose-editor-tools"><div className="goose-color-palette" role="group" aria-label="Ink colour">{drawingColors.map((value, index) => <button key={value} className="goose-color" style={{ background: value }} aria-label={['Red', 'Green', 'Blue', 'Purple', 'Black', 'White'][index]} aria-pressed={color === value} disabled={busy} onClick={() => setColor(value)} />)}</div><div className="goose-editor-actions"><button className="secondary-button" disabled={busy || !strokes.length} onClick={() => setStrokes(items => items.slice(0, -1))}>Undo</button><button className="secondary-button" disabled={busy || !strokes.length} onClick={() => setStrokes([])}>Clear</button></div><form onSubmit={event => { event.preventDefault(); void save() }}><label>Drawing name<input maxLength={60} value={name} disabled={busy} onChange={event => setName(event.target.value)} /></label><p>{strokes.length}/32 strokes · {strokes.reduce((sum, item) => sum + item.points.length, 0)}/512 points</p><SettingsFeedback label="Drawing save status" state={saveState} dirty={dirty} error={saveError}><button className="primary-button" disabled={busy || !dirty || !strokes.length || !name.trim()}>Save drawing</button></SettingsFeedback></form>{identity && <button className="text-button" disabled={busy || dirty} onClick={() => { setSaveState('idle'); setSaveError(''); setIdentity(null); setName(''); setStrokes([]); setBaseline(JSON.stringify({ name: '', strokes: [] })) }}>New drawing</button>}</div></div>{deletion && <div className="modal-backdrop"><section ref={dialog} className="modal" role="dialog" aria-modal="true" aria-labelledby="delete-sketch-title" onKeyDown={event => { if (event.key === 'Enter' && !event.defaultPrevented && !busy) { event.preventDefault(); void remove() } }}><h2 id="delete-sketch-title">Delete drawing?</h2><p>Remove “{selected?.name}” from the shared library. Active drawings will finish.</p><form onSubmit={event => { event.preventDefault(); void remove() }}><div className="modal-actions"><button autoFocus type="button" className="secondary-button" disabled={busy} onClick={() => setDeletion(false)}>Cancel</button><button className="danger-button" disabled={busy}>Delete drawing</button></div></form></section></div>}</div>
 }

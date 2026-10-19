@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test'
 
 test('admin model selection shows switching and rollback', async ({ page }) => {
   let status = { ready: true, model: 'large-v3-turbo', target: null as string | null, phase: 'ready', error: null as string | null }
-  await page.route('**/api/admin/transcription', async route => {
+  await page.route('**/api/admin/transcription{,/status,/settings}', async route => {
     if (route.request().method() === 'PUT') status = { ...status, ready: false, target: route.request().postDataJSON().model, phase: 'downloading' }
     await route.fulfill({ json: status })
   })
@@ -25,7 +25,7 @@ test('admin model selection shows switching and rollback', async ({ page }) => {
 
 test('disabled recording hides conversation history and keeps triggers', async ({ page }) => {
   let enabled = true
-  await page.route('**/api/conversations/status', route => route.fulfill({ json: { enabled, recording: false, session: null, participants: [], backlog: 0, dropped: 0, error: null } }))
+  await page.route('**/api/conversations/status', route => route.fulfill({ json: { enabled, recording: false, session: null, participants: [], backlog: 0, dropped: 0, error: null, can_read_transcript: true } }))
   await page.route('**/api/conversations/recording', route => { enabled = route.request().postDataJSON().enabled; return route.fulfill({ json: { enabled } }) })
   await page.goto('/conversation')
   await expect(page.getByRole('button', { name: 'Conversation history', exact: true })).toHaveCount(0)
@@ -58,7 +58,7 @@ test('trigger sound dropdown stays inside viewport', async ({ page, request }) =
 })
 
 test('Apple GPU offers only supported models', async ({ page }) => {
-  await page.route('**/api/admin/transcription', route => route.fulfill({ json: {
+  await page.route('**/api/admin/transcription{,/status,/settings}', route => route.fulfill({ json: {
     ready: true, model: 'large-v3-turbo', phase: 'ready', device: 'mlx', models: ['large-v3-turbo', 'large-v3'],
   } }))
   await page.goto('/admin?tab=conversation')
@@ -71,7 +71,7 @@ test('Apple GPU offers only supported models', async ({ page }) => {
 
 test('vocabulary hints save, persist and clear while the model is loading', async ({ page }) => {
   let hints = ''
-  await page.route('**/api/admin/transcription', route => route.fulfill({ json: { ready: false, model: 'large-v3-turbo', phase: 'loading' } }))
+  await page.route('**/api/admin/transcription{,/status,/settings}', route => route.fulfill({ json: { ready: false, model: 'large-v3-turbo', phase: 'loading' } }))
   await page.route('**/api/admin/transcription/vocabulary', async route => {
     if (route.request().method() === 'PUT') hints = route.request().postDataJSON().hints.trim()
     await route.fulfill({ json: { hints } })
@@ -125,7 +125,7 @@ test('failed vocabulary saves preserve the draft and allow retry', async ({ page
 test('admin switches between API and local providers', async ({ page }) => {
   let provider = 'local'
   const status = () => ({ provider, ready: true, model: provider === 'local' ? 'large-v3-turbo' : 'nova-3', device: provider === 'local' ? 'mlx' : 'deepgram', models: provider === 'local' ? ['large-v3-turbo', 'large-v3'] : ['nova-3'], phase: 'ready' })
-  await page.route('**/api/admin/transcription', route => route.fulfill({ json: status() }))
+  await page.route('**/api/admin/transcription{,/status,/settings}', route => route.fulfill({ json: status() }))
   await page.route('**/api/admin/transcription/provider', route => { provider = route.request().postDataJSON().provider; return route.fulfill({ json: status() }) })
   await page.goto('/admin?tab=conversation')
   const selector = page.getByRole('button', { name: 'Transcription provider', exact: true })
@@ -147,7 +147,7 @@ test('conversation tab contains documented API options and migrates existing voc
   await page.route('**/api/admin/transcription/vocabulary', route => route.fulfill({ json: { hints: 'Enrique, patapim\nbrrr' } }))
   await page.goto('/admin?tab=settings')
   await expect(page.getByRole('button', { name: 'Transcription provider', exact: true })).toHaveCount(0)
-  await page.getByRole('tab', { name: 'Conversation', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings navigation', exact: true }).getByRole('button', { name: 'Conversation', exact: true }).click()
   await expect(page).toHaveURL(/tab=conversation$/)
   await expect(page.getByRole('textbox', { name: 'Vocabulary hint 1', exact: true })).toHaveValue('Enrique')
   await expect(page.getByRole('textbox', { name: 'Vocabulary hint 2', exact: true })).toHaveValue('patapim')
@@ -174,14 +174,14 @@ test('conversation tab contains documented API options and migrates existing voc
   await page.reload()
   await expect(page.getByRole('textbox', { name: 'Replacement 1', exact: true })).toHaveValue('Naar bed')
   await page.getByRole('switch', { name: 'Smart Format', exact: true }).scrollIntoViewIfNeeded()
-  await expect(page.locator('.deepgram-option-toggle').first()).toHaveCSS('flex-direction', 'row')
+  await expect(page.locator('.deepgram-option .setting-switch-row').first()).toHaveCSS('display', 'grid')
   await page.screenshot({ path: `../.runtime/conversation-options-${test.info().project.name}.png` })
 })
 
 
 test('conversation controls group vocabulary with keyterms and persist language choices', async ({ page }) => {
   let language = 'nl'
-  await page.route('**/api/admin/transcription', route => route.fulfill({ json: { provider: 'deepgram', device: 'deepgram', model: 'nova-3', ready: true, phase: 'configured', models: ['nova-3'], language } }))
+  await page.route('**/api/admin/transcription{,/status,/settings}', route => route.fulfill({ json: { provider: 'deepgram', device: 'deepgram', model: 'nova-3', ready: true, phase: 'configured', models: ['nova-3'], language } }))
   await page.route('**/api/admin/transcription/language', route => { language = route.request().postDataJSON().language; return route.fulfill({ json: { language } }) })
   await page.goto('/admin?tab=conversation')
   const dropdown = page.getByRole('button', { name: 'Transcription language', exact: true })

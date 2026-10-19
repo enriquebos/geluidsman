@@ -45,7 +45,7 @@ test('native SSE reconnect spanning a restart discovers a replacement build', as
   await captureEvents(page)
   const build = (await (await page.request.get('/api/state')).json()).build_id
   let connections = 0
-  await page.route('**/api/events', route => {
+  await page.route('**/api/events?*', route => {
     const build_id = ++connections > 1 ? 'restarted-build' : build
     return route.fulfill({ contentType: 'text/event-stream', body: `retry: 500\nevent: refresh\ndata: ${JSON.stringify({ build_id })}\n\n` })
   })
@@ -149,8 +149,8 @@ test('error notifications stack below an update banner when it appears and wraps
   await expect.poll(gap).toBeGreaterThanOrEqual(11)
   await page.setViewportSize({ width: 390, height: 844 })
   await expect.poll(gap).toBeGreaterThanOrEqual(11)
-  await page.evaluate(() => { const spacer = document.createElement('div'); spacer.style.height = '2000px'; document.querySelector('main')!.append(spacer); window.scrollTo(0, 1000) })
-  await expect(banner).toHaveCSS('top', '16px')
+  await page.evaluate(() => { const spacer = document.createElement('div'); spacer.style.height = '2000px'; const pane = document.querySelector('.settings-main-pane')!; pane.append(spacer); pane.scrollTop = 1000 })
+  await expect.poll(async () => parseFloat(await banner.evaluate(element => getComputedStyle(element).top))).toBeGreaterThan(16)
   await expect.poll(gap).toBeGreaterThanOrEqual(11)
   await page.screenshot({ path: testInfo.outputPath('update-error-stack.png') })
 })

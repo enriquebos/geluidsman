@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import math
 import os
 import re
@@ -130,6 +131,20 @@ async def read_json(reader: aiohttp.StreamReader | asyncio.StreamReader) -> dict
 
 
 class MusicDecoder(discord.FFmpegPCMAudio):
+    def cleanup(self) -> None:
+        process = getattr(self, "_process", None)
+        if process and not getattr(self, "_stopped", False):
+            code = process.poll()
+            outcome = "requested_stop" if code is None else "completed" if code == 0 else "unexpected_exit"
+            logging.getLogger("app.music").log(
+                logging.WARNING if code else logging.INFO,
+                "Music decoder cleanup: pid=%s outcome=%s exit_before_cleanup=%s",
+                process.pid,
+                outcome,
+                code,
+            )
+        super().cleanup()
+
     def _spawn_process(self, args: list[str], **kwargs: object) -> subprocess.Popen:
         proxy = args[args.index("-http_proxy") + 1] if "-http_proxy" in args else ""
         if self is not None:
@@ -589,12 +604,8 @@ class MusicSources:
         if not chosen:
             chosen = await self.verify_topic_matches(track, list(candidates.values()))
         if not chosen:
-            message = (
-                "No sufficiently close YouTube recording matched this Spotify song's "
-                "title, artist, version and duration. "
-                "Choose a recording manually."
-            )
-            raise MusicSourceError(message, reason="match_not_found")
+            reason = "match_not_found"
+            raise source_error(reason)
         result.update(youtube_id=chosen.track["youtube_id"], youtube_title=chosen.track["title"])
         return result
 
@@ -638,12 +649,20 @@ class MusicSources:
 
     async def download(self, track: dict, path: Path, byte_limit: int) -> dict:
         matched = await self.match(track)
+        if self.cache and (shared := await self.cache.share_recording(matched, path.stem)):
+            return shared
         result = await self.recording(matched)
         self.stream_metadata(result, matched, 0)
         overhead = max(65536, math.ceil(byte_limit / DOWNLOAD_CHUNK_BYTES) * 8192)
         proxy = await self.open_proxy(byte_limit + overhead, 600)
         try:
-            received = await self.download_stream(result["stream"], path, proxy, byte_limit)
+            received = await self.download_stream(
+                result["stream"],
+                path,
+                proxy,
+                byte_limit,
+                lambda done, total: self.cache.progress(path.stem, done, total) if self.cache else None,
+            )
             await self.verify_download(path, matched["duration"])
             return {"track": matched, "container": result["container"], "bytes": received}
         except MusicSourceError as exc:
@@ -658,7 +677,13 @@ class MusicSources:
             await asyncio.to_thread(proxy.__exit__)
 
     @staticmethod
-    async def download_stream(url: str, path: Path, proxy: DownloadProxy, byte_limit: int) -> int:
+    async def download_stream(
+        url: str,
+        path: Path,
+        proxy: DownloadProxy,
+        byte_limit: int,
+        progress: Callable[[int, int | None], None] | None = None,
+    ) -> int:
         timeout = aiohttp.ClientTimeout(total=600, sock_read=20)
         async with asyncio.timeout(600), aiohttp.ClientSession(timeout=timeout, trust_env=False) as client:
             file = path.open("wb")
@@ -672,7 +697,13 @@ class MusicSources:
                         expected, total = MusicSources.download_range(response, received, total, byte_limit)
                         validator = MusicSources.download_validator(response, validator)
                         received += await MusicSources.download_response(
-                            response, file, byte_limit - received, expected
+                            response,
+                            file,
+                            byte_limit - received,
+                            expected,
+                            (lambda count, received=received, total=total: progress(received + count, total))
+                            if progress
+                            else None,
                         )
                         if response.status == HTTPStatus.OK:
                             break
@@ -735,7 +766,11 @@ class MusicSources:
 
     @staticmethod
     async def download_response(
-        response: aiohttp.ClientResponse, file: BinaryIO, byte_limit: int, expected: int | None
+        response: aiohttp.ClientResponse,
+        file: BinaryIO,
+        byte_limit: int,
+        expected: int | None,
+        progress: Callable[[int], None] | None = None,
     ) -> int:
         count = 0
         async for chunk in response.content.iter_chunked(262144):
@@ -752,6 +787,8 @@ class MusicSources:
             except asyncio.CancelledError:
                 await task
                 raise
+            if progress:
+                progress(count)
         if expected is not None and count != expected:
             msg = "early_eof"
             raise source_error(msg)
@@ -797,13 +834,15 @@ class MusicSources:
 
     def create_local_source(self, result: dict, playback: tuple) -> GuardedMusicAudio:
         position, volume = playback
+        normalization = result.get("normalization", {"gain_db": 0.0})
+        gain = float(normalization["gain_db"])
         before = shlex.join(
             [
                 "-nostdin",
                 "-protocol_whitelist",
                 "file",
                 "-f",
-                "matroska" if result["container"] == "webm" else "mov",
+                {"webm": "matroska", "m4a": "mov", "mp3": "mp3"}[result["container"]],
                 "-ss",
                 str(position),
             ]
@@ -812,9 +851,12 @@ class MusicSources:
             result["stream"],
             executable=self.settings.ffmpeg_path,
             before_options=before,
-            options="-vn -sn -dn -t " + str(result["track"]["duration"] - position),
+            options="-vn -sn -dn -af aformat=sample_rates=48000:channel_layouts=stereo,"
+            f"volume={gain:.8f}dB -t " + str(result["track"]["duration"] - position),
         )
-        return GuardedMusicAudio(decoder, None, result["track"], (position, max(0.0, min(volume, 2.0))))
+        audio = GuardedMusicAudio(decoder, None, result["track"], (position, max(0.0, min(volume, 2.0))))
+        audio.music_normalization = dict(normalization)
+        return audio
 
     async def local_audio(self, local: dict, position: float, volume: float) -> GuardedMusicAudio:
         if position >= local["track"]["duration"]:
@@ -868,6 +910,25 @@ class MusicSources:
         )
         return GuardedMusicAudio(decoder, proxy, matched, (position, max(0.0, min(volume, 2.0))))
 
+    async def cached_source(self, track: dict, position: float, volume: float) -> GuardedMusicAudio | None:
+        track = dict(track)
+        frozen = track.pop("_playback_normalization", None)
+        normalizer = getattr(self.cache, "normalization", None)
+        if normalizer:
+            normalizer.preparing += 1
+            normalizer.wake.set()
+        try:
+            local = await self.cache.ensure(track) if self.cache else None
+            if local:
+                if frozen and frozen.get("media_version") == local.get("normalization", {}).get("media_version"):
+                    local["normalization"] = frozen
+                return await self.local_audio(local, position, volume)
+        finally:
+            if normalizer:
+                normalizer.preparing -= 1
+                normalizer.wake.set()
+        return None
+
     async def source(self, track: dict, position: float, volume: float) -> GuardedMusicAudio:
         if not math.isfinite(position) or position < 0 or not math.isfinite(volume):
             message = "Invalid music playback position or volume."
@@ -876,9 +937,9 @@ class MusicSources:
         if self.closed or len(self.audio) >= MAX_ACTIVE_SOURCES:
             message = "The music player is busy or shutting down."
             raise MusicSourceError(message)
-        local = await self.cache.ensure(track) if self.cache else None
+        local = await self.cached_source(track, position, volume)
         if local:
-            return await self.local_audio(local, position, volume)
+            return local
         matched = await self.match(track)
         result = await self.recording(matched)
         self.stream_metadata(result, matched, position)

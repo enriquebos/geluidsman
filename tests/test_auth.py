@@ -185,7 +185,7 @@ def test_private_endpoints_and_csrf(client: TestClient) -> None:
         "/api/settings/personal",
     ):
         assert client.get(endpoint).status_code == 401
-    assert client.get("/api/health").json() == {"ok": True, "application": "geluidsman"}
+    assert client.get("/api/health").json() == {"ok": True, "application": "geluidsman", "database": "available"}
     user = login(client)
     body = {"preview_volume": 0.4, "caption_language": "nl"}
     assert client.put("/api/settings/personal", json=body).status_code == 403
@@ -303,7 +303,8 @@ def test_app_settings_audit_filters_retention_and_snapshot(client: TestClient) -
     ).json()["results"]
     assert rows[0]["resource_name"] == "Remember me"
     assert rows[0]["actor_name"] == "Test User"
-    assert db.one("SELECT id FROM audit WHERE action='sound.create'") is None
+    assert db.one("SELECT id FROM audit WHERE action='sound.create'") is not None
+    assert client.get("/api/audit", params={"action": "sound.create"}).json()["results"] == []
     first = client.get("/api/audit?limit=1").json()
     assert first["next_cursor"] is not None
     assert (

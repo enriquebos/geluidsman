@@ -25,6 +25,9 @@ class MemoryStore:
         self.payload = payload or {}
         self.writes: list[dict] = []
 
+    def saved_sources(self) -> dict:
+        return {}
+
     def load_player(self) -> dict:
         return copy.deepcopy(self.payload)
 
@@ -480,6 +483,7 @@ def test_pause_cleans_source_after_voice_client_is_removed() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("change", ["mode", "member"])
 @pytest.mark.parametrize(
     "operation",
@@ -500,7 +504,9 @@ def test_pause_cleans_source_after_voice_client_is_removed() -> None:
         "repeat",
     ],
 )
-def test_mutation_rechecks_access_after_waiting_for_player_lock(operation: str, change: str) -> None:
+def test_mutation_rechecks_access_after_waiting_for_player_lock(
+    operation: str, change: str, *, asynchronous: bool
+) -> None:
     async def scenario() -> None:
         player, store, sources, state = player_parts()
         await player.start()
@@ -514,7 +520,7 @@ def test_mutation_rechecks_access_after_waiting_for_player_lock(operation: str, 
                 message = "Music access changed."
                 raise ValueError(message)
 
-        guard = Mock(side_effect=authorize)
+        guard = (AsyncMock if asynchronous else Mock)(side_effect=authorize)
         entries = [entry["id"] for entry in player.queue]
         options = {
             "enqueue": lambda: player.enqueue([track("three")], {"id": "1"}, guard=guard),
@@ -1022,5 +1028,29 @@ def test_restart_resumes_cached_audio_beyond_the_previously_decoded_part(tmp_pat
         finally:
             await restored.close()
             await sources.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("removal", ["current", "upcoming"])
+def test_repeat_all_keeps_playlist_queue_removals_after_restart(removal: str) -> None:
+    async def scenario() -> None:
+        player, store, _, _ = player_parts()
+        await player.start()
+        await player.play_playlist([track("one"), track("two"), track("three")], {"id": "1"}, {"id": "p", "name": "P"})
+        await settled(player)
+        await player.command("repeat", 2)
+        removed = player.queue[0 if removal == "current" else 1]
+        await player.remove(removed["id"])
+        await player.close()
+        restored, _, _, _ = player_parts(store.payload)
+        await restored.start()
+        await restored.command("play")
+        await settled(restored)
+        for _ in range(5):
+            assert restored.current["track"]["title"] != removed["track"]["title"]
+            await restored.finished(restored.generation, None)
+            await settled(restored)
+        await restored.close()
 
     asyncio.run(scenario())

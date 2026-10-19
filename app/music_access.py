@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 
-from app.permissions import check_permission, effective_permissions
+from app.permissions import can_use_voice_channel, check_permission, effective_permissions
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -30,7 +30,11 @@ def music_voice_access(app: FastAPI, user: dict, *, mode_required: bool = True, 
     voice = state.voice
     if app.state.bot.closing or not app.state.bot.client.is_ready() or not voice or not voice.is_connected():
         raise HTTPException(409, "Connect the bot to a voice channel before controlling music.")
-    if not any(str(member.id) == user["id"] and not member.bot for member in voice.channel.members):
+    if not can_use_voice_channel(user["id"], user["permissions"], voice.channel):
         raise HTTPException(403, "Join the bot's voice channel to control music or switch modes.")
     if mode_required and state.audio_mode != "music":
         raise HTTPException(409, "Switch to Music mode before controlling the music queue or player.")
+
+
+async def recheck_music_voice_access(app: FastAPI, user_id: str) -> None:
+    music_voice_access(app, await music_user(app, user_id))

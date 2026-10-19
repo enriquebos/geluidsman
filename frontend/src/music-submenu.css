@@ -1,0 +1,31 @@
+.music-item-menu.music-cascading-menu{min-width:260px}
+.music-cascading-menu>button{min-height:42px}
+.music-cascading-menu>button>span{flex:1;white-space:nowrap}
+.music-cascading-menu .music-submenu-chevron{margin-left:auto}
+.music-cascading-menu>button.music-submenu-expanded{background:#7962b42b;color:#eee5fb}
+.music-cascading-menu>button.danger{margin-top:4px;border-top:1px solid #4a3b59;border-radius:0 0 5px 5px}
+.music-cascading-menu .lucide-circle-check{color:#83dba2}
+.music-save-menu.music-save-submenu{width:min(300px,calc(100vw - 16px));height:min(320px,calc(100dvh - 16px));max-height:calc(100dvh - 16px);padding:8px;gap:6px;border-radius:9px;animation:music-submenu-in .12s ease-out both;background:#261e30;--submenu-enter-x:6px}
+.music-save-submenu[data-side=right]{--submenu-enter-x:-6px}
+.music-save-submenu>.search{border-color:#4a3b59;border-radius:6px;padding-inline:10px}
+.music-save-submenu>.search input{font-size:13px;padding:10px 0}
+.music-save-submenu>.music-save-new{font-size:13px;min-height:40px;padding:8px 10px}
+.music-save-submenu .music-save-choices{flex:1;max-height:none;padding-top:5px;scrollbar-width:thin;scrollbar-color:#a699b333 transparent}
+.music-save-submenu .loading-row{min-height:42px;padding:9px 10px;gap:10px}
+.music-save-submenu .loading-row i{display:none}
+.music-save-submenu .loading-row span{height:14px;width:65%}
+.music-save-submenu .loading-row b{height:16px;width:16px;border-radius:50%}
+.music-save-submenu .music-save-choice{min-height:42px;gap:10px;padding:9px 10px;cursor:pointer;border-radius:5px}
+.music-save-submenu .music-save-choice>span{display:block;flex:1;min-width:0}
+.music-save-submenu .music-save-choice strong{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:400}
+.music-save-submenu .music-save-choice>svg{flex-shrink:0}
+.music-save-submenu .music-save-choice:focus-visible{outline-offset:-2px;background:#7962b42b}
+.music-submenu-back{display:none;align-items:center;gap:7px;border:0;background:transparent;padding:7px 4px;color:var(--text);font-size:13px}
+@media(max-width:600px){.music-submenu-back{display:flex}}
+@keyframes music-submenu-in{from{opacity:0;transform:translateX(var(--submenu-enter-x))}to{opacity:1;transform:translateX(0)}}
+@media(prefers-reduced-motion:reduce){.music-save-menu.music-save-submenu{animation:none}}
+
+.music-save-art .music-playlist-artwork { width: 100%; height: 100%; border-radius: inherit; flex: none; }
+.music-save-art .music-playlist-artwork svg { width: 20px; height: 20px; }
+.music-save-choice[aria-busy="true"] { cursor: progress; }
+.music-save-submenu .music-save-choice > .music-save-art { width: 30px; height: 30px; flex: 0 0 30px; }

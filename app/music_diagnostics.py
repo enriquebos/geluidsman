@@ -10,8 +10,8 @@ MAX_HTTP_ERROR = 599
 MAX_PROCESS_EXIT = 255
 HTTP_STATUS = re.compile(r"(?:http(?:\s+error)?|server returned|status(?:\s+code)?)\D{0,16}([45]\d\d)", re.IGNORECASE)
 REASONS = {
-    "match_not_found": "No sufficiently close YouTube recording matched the Spotify song. Choose its source manually.",
-    "age_restricted": "YouTube requires age verification for this recording. Choose another recording.",
+    "match_not_found": "No sufficiently close YouTube recording matched this Spotify song's title",
+    "age_restricted": "YouTube requires age verification",
     "authentication_required": "YouTube requires sign-in for this recording. Choose another recording.",
     "country_restricted": "This recording is unavailable in the server's country. Choose another recording.",
     "private_recording": "This YouTube recording is private. Choose another recording.",
